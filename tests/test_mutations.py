@@ -224,6 +224,26 @@ MUTATIONS: list[tuple[str, str, str]] = [
         "{{ weekdays | count == 0\n       or ['mon','tue','wed','thu','fri','sat','sun']",
         "{{ ['mon','tue','wed','thu','fri','sat','sun']",
     ),
+    (
+        "a run that sends no command leaves no trace of why",
+        "                Без действий: {{ verdict }} |",
+        "                Без действий |",
+    ),
+    (
+        "the verdict reports a later reason than the one that decided",
+        "{% if not charger_online %}станция офлайн",
+        "{% if false %}станция офлайн",
+    ),
+    (
+        "the snapshot drifts from the values it claims to report",
+        "        'уставка_нужна': desired_current,",
+        "        'уставка_нужна': current_now,",
+    ),
+    (
+        "a charger drawing no current still reports itself as healthy",
+        "{% elif no_power_alarm %}включено, но ток не идёт ({{ alarm_reason }})\n    ",
+        "",
+    ),
 ]
 
 
