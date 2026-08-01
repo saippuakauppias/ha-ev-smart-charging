@@ -20,11 +20,30 @@ def test_an_unplugged_cable_prevents_charging(evaluate, status):
     assert ctx["should_charge"] is False
 
 
-def test_an_unknown_status_is_treated_as_plugged_in(evaluate):
-    """Better to try than to sit out the whole night over a missing sensor."""
+def test_an_unreadable_status_does_not_start_a_session(evaluate):
+    """Starting blind is worse than waiting.
+
+    Without a readable status there is no way to tell a plugged-in cable from
+    an empty socket, and turning the charger on would also make the watchdog
+    report a phantom "switched on but no current".
+    """
     ctx = evaluate(moment(23, 0), **{STATUS: State("unknown")})
+    assert ctx["status_known"] is False
+    assert ctx["plugged_in"] is False
+    assert ctx["should_charge"] is False
+
+
+def test_an_unreadable_status_does_not_interrupt_a_running_session(evaluate):
+    """A sensor dropping out mid-charge is not a reason to cut the power."""
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        **{STATUS: State("unavailable"), "switch.charger": charging_since(now)},
+    )
+    assert ctx["status_known"] is False
     assert ctx["plugged_in"] is True
     assert ctx["should_charge"] is True
+    assert ctx["must_stop"] is False
 
 
 def test_an_unplugged_cable_does_not_trigger_a_stop_command(evaluate):
@@ -179,3 +198,47 @@ def test_stop_reasons_are_reported_in_priority_order(evaluate, overrides, expect
     overrides["switch.charger"] = charging_since(now)
     ctx = evaluate(now, **overrides)
     assert ctx["stop_reason"] == expected
+
+
+def test_an_unplugged_cable_stops_a_running_session(evaluate):
+    """The charger reporting an empty socket while the switch is still on means
+    the cable was pulled; leaving the switch on would arm the next plug-in."""
+    now = moment(3, 0)
+    ctx = evaluate(now, **{STATUS: "available", "switch.charger": charging_since(now)})
+    assert ctx["must_stop"] is True
+    assert ctx["stop_reason"] == "unplugged"
+
+
+# ------------------------------------------------------------------ invariant
+
+
+@pytest.mark.parametrize("hour", [23, 3, 6, 9, 14])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {},
+        {STATUS: "fault"},
+        {STATUS: "available"},
+        {STATUS: "charged"},
+        {STATUS: State("unavailable")},
+        {SOC: 100},
+        {SOC: State("unavailable")},
+        {TRACKER: "not_home"},
+        {TRACKER: State("unavailable")},
+        {LINK: "off"},
+        {PROBLEM: "on"},
+    ],
+)
+@pytest.mark.parametrize("running", [True, False])
+def test_charging_and_stopping_are_never_demanded_at_once(
+    evaluate, hour, overrides, running
+):
+    """Both branches of the action block are guarded by these two flags. If they
+    could ever hold together, the charger would be switched on and off in the
+    same run."""
+    now = moment(hour, 0)
+    world = dict(overrides)
+    if running:
+        world["switch.charger"] = charging_since(now)
+    ctx = evaluate(now, **world)
+    assert not (ctx["should_charge"] and ctx["must_stop"])

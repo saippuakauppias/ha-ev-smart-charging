@@ -14,12 +14,21 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import math
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import yaml
 from jinja2 import Environment
+
+#: Mirrors Home Assistant's own entity id validation.
+_VALID_ENTITY_ID = re.compile(r"^(?!.+__)([a-z][a-z0-9_]*)\.([a-z0-9_]+)$")
+
+
+class TemplateError(Exception):
+    """Raised where Home Assistant would raise ``TemplateError``."""
 
 # Europe/Moscow style fixed offset. A fixed offset keeps the tests deterministic
 # and independent of the tzdata version installed on the CI runner.
@@ -76,6 +85,12 @@ class _StatesAccessor:
         return obj.state if obj is not None else "unknown"
 
     def __getitem__(self, entity_id: str) -> State | None:
+        # Home Assistant raises on a malformed entity id here rather than
+        # returning None. An empty string is the realistic case: it is what an
+        # unfilled optional input normalises to, and a blueprint that indexes
+        # ``states['']`` would crash the whole render in production.
+        if not _VALID_ENTITY_ID.match(str(entity_id)):
+            raise TemplateError(f"Invalid entity ID '{entity_id}'")
         return self._world.get(entity_id)
 
 
@@ -83,6 +98,23 @@ class _StatesAccessor:
 #: the closed-loop night simulation, which renders the same ~90 templates on
 #: every tick.
 _ENV = Environment()
+
+
+def _forgiving_round(value: Any, precision: int = 0, method: str = "common") -> Any:
+    """Home Assistant's ``round`` filter, which returns an int at precision 0."""
+    number = float(value)
+    if method == "ceil":
+        rounded = math.ceil(number * 10**precision) / 10**precision
+    elif method == "floor":
+        rounded = math.floor(number * 10**precision) / 10**precision
+    elif method == "half":
+        rounded = round(number * 2) / 2
+    else:
+        rounded = round(number, precision)
+    return int(rounded) if precision == 0 and method != "half" else rounded
+
+
+_ENV.filters["round"] = _forgiving_round
 _COMPILED: dict[str, Any] = {}
 
 
@@ -109,11 +141,14 @@ def _build_helpers(world: dict[str, State], now: dt.datetime) -> dict[str, Any]:
         return states(entity_id) not in ("unknown", "unavailable")
 
     def is_number(value: Any) -> bool:
+        # Home Assistant rejects infinities and NaN here. Accepting them would
+        # let a broken sensor reading through and hide a real crash: ``'inf'``
+        # passes ``float()`` but blows up the first comparison downstream.
         try:
-            float(value)
+            number = float(value)
         except (TypeError, ValueError):
             return False
-        return True
+        return math.isfinite(number)
 
     def today_at(time_str: str = "00:00:00") -> dt.datetime:
         parts = [int(p) for p in str(time_str).split(":")]

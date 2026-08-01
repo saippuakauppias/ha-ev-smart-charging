@@ -125,10 +125,91 @@ def test_emergency_charge_uses_the_maximum(evaluate):
     assert ctx["should_charge"] is True
 
 
+def test_the_emergency_top_up_does_not_quit_on_the_threshold(evaluate):
+    """Stopping the moment the threshold is crossed would leave the car at the
+    bare minimum and chatter on and off as the percentage wobbles."""
+    now = moment(14, 0)
+    ctx = evaluate(
+        now,
+        inputs={"emergency_soc": 20},
+        **{SOC: 22, "switch.charger": charging_since(now)},
+    )
+    assert ctx["emergency"] is True
+    assert ctx["must_stop"] is False
+
+
+def test_the_emergency_top_up_ends_once_the_margin_is_reached(evaluate):
+    now = moment(14, 0)
+    ctx = evaluate(
+        now,
+        inputs={"emergency_soc": 20, "emergency_hysteresis": 10},
+        **{SOC: 31, "switch.charger": charging_since(now)},
+    )
+    assert ctx["emergency"] is False
+    assert ctx["must_stop"] is True
+
+
+def test_an_idle_charger_only_enters_the_emergency_below_the_threshold(evaluate):
+    """The margin applies to finishing the top-up, not to starting one."""
+    ctx = evaluate(moment(14, 0), inputs={"emergency_soc": 20}, **{SOC: 25})
+    assert ctx["emergency"] is False
+    assert ctx["should_charge"] is False
+
+
 def test_fallback_current_is_used_when_no_plan_is_possible(evaluate):
     ctx = evaluate(moment(1, 0), inputs={"car_battery_sensor": []})
     assert ctx["plan_source"] == "none"
     assert ctx["desired_current"] == 10
+
+
+def test_a_custom_fallback_current_is_honoured(evaluate):
+    ctx = evaluate(
+        moment(1, 0),
+        inputs={"car_battery_sensor": [], "fallback_current": 16},
+    )
+    assert ctx["desired_current"] == 16
+
+
+# ------------------------------------------------------------------- phases
+
+
+def test_three_phases_need_a_third_of_the_current(evaluate):
+    """Three phases carry three times the power at the same amperage.
+
+    Ignoring the phase count would triple the real load and trip the breaker
+    the blueprint is supposed to stay under.
+    """
+    single = evaluate(moment(23, 0), inputs={"phases": "1"})
+    three = evaluate(moment(23, 0), inputs={"phases": "3"})
+    assert three["calc_current"] == pytest.approx(single["calc_current"] / 3, rel=0.02)
+
+
+def test_the_phase_count_does_not_change_the_energy_budget(evaluate):
+    """Phases affect how fast the energy arrives, not how much is needed."""
+    single = evaluate(moment(23, 0), inputs={"phases": "1"})
+    three = evaluate(moment(23, 0), inputs={"phases": "3"})
+    assert three["needed_kwh"] == pytest.approx(single["needed_kwh"])
+
+
+# --------------------------------------------------------------- efficiency
+
+
+@pytest.mark.parametrize(
+    "efficiency,expected_kwh",
+    [(100, 27.95), (88, 31.76), (60, 46.58)],
+)
+def test_the_budget_is_grossed_up_by_the_efficiency(
+    evaluate, efficiency, expected_kwh
+):
+    """Losses mean more has to come out of the wall than lands in the battery."""
+    ctx = evaluate(moment(23, 0), inputs={"efficiency": efficiency})
+    assert ctx["needed_kwh"] == pytest.approx(expected_kwh, rel=1e-3)
+
+
+def test_a_worse_efficiency_asks_for_more_current(evaluate):
+    lossy = evaluate(moment(23, 0), inputs={"efficiency": 70})
+    clean = evaluate(moment(23, 0), inputs={"efficiency": 95})
+    assert lossy["calc_current"] > clean["calc_current"]
 
 
 @pytest.mark.parametrize(

@@ -101,11 +101,27 @@ def test_arriving_outside_the_window_does_not_start_charging(evaluate):
     assert ctx["should_charge"] is False
 
 
-def test_zone_without_a_friendly_name_falls_back_gracefully(evaluate):
+def test_zone_without_a_friendly_name_falls_back_to_the_object_id(evaluate):
+    """A nameless zone must not lock the user out of charging forever.
+
+    Trackers report the zone's friendly name, so a zone missing one would never
+    match and ``car_home`` would be false for good. Falling back to the object
+    id (``zone.dacha`` -> ``dacha``) keeps the common case working.
+    """
     ctx = evaluate(
         moment(1, 0),
         inputs={"home_zone": DACHA},
         **{DACHA: State(1, {}), TRACKER: "Dacha"},
+    )
+    assert ctx["zone_name"] == "dacha"
+    assert ctx["car_home"] is True
+
+
+def test_a_nameless_zone_still_rejects_a_car_that_is_elsewhere(evaluate):
+    ctx = evaluate(
+        moment(1, 0),
+        inputs={"home_zone": DACHA},
+        **{DACHA: State(1, {}), TRACKER: "not_home"},
     )
     assert ctx["car_home"] is False
     assert ctx["should_charge"] is False

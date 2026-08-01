@@ -218,6 +218,54 @@ def test_energy_plan_needs_a_target_to_activate(evaluate):
     assert ctx["plan_source"] == "none"
 
 
+def test_a_cumulative_meter_is_not_mistaken_for_a_session_meter(evaluate):
+    """Both kinds carry ``device_class: energy``, so they are easy to confuse.
+
+    A lifetime total dwarfs the target, which would read as "already delivered"
+    and silently block charging forever. Falling back to the reserve current
+    keeps the car charging and leaves the mistake visible.
+    """
+    ctx = evaluate(
+        moment(23, 0),
+        inputs={
+            "car_battery_sensor": [],
+            "session_energy_sensor": ENERGY,
+            "session_energy_target": 20,
+        },
+        **{ENERGY: 4500.0},
+    )
+    assert ctx["energy_valid"] is False
+    assert ctx["plan_source"] == "none"
+    assert ctx["target_reached"] is False
+    assert ctx["should_charge"] is True
+
+
+def test_a_session_meter_just_over_the_target_is_still_trusted(evaluate):
+    """Overshooting the target slightly is normal and must not look cumulative."""
+    ctx = evaluate(
+        moment(23, 0),
+        inputs={
+            "car_battery_sensor": [],
+            "session_energy_sensor": ENERGY,
+            "session_energy_target": 20,
+        },
+        **{ENERGY: 21.5},
+    )
+    assert ctx["energy_valid"] is True
+    assert ctx["target_reached"] is True
+
+
+@pytest.mark.parametrize("reading", ["inf", "-inf", "nan"])
+def test_non_finite_readings_are_rejected(evaluate, reading):
+    """``float('inf')`` survives a plain float() call but poisons every
+    comparison downstream, so it must be filtered out with the same rigour as
+    an unavailable entity."""
+    ctx = evaluate(moment(23, 0), **{SOC: State(reading)})
+    assert ctx["soc_present"] is False
+    assert ctx["soc_problem"] == "unavailable"
+    assert ctx["desired_current"] == 10
+
+
 # ---------------------------------------------------------- capacity and soh
 
 

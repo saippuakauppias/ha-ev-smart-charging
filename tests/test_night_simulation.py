@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
+from typing import Any
 
 import pytest
 from conftest import (
@@ -18,6 +19,7 @@ from conftest import (
     HOME,
     LINK,
     NUMBER,
+    OUTSIDE,
     POWER,
     PROBLEM,
     SOC,
@@ -39,6 +41,7 @@ class NightLog:
     writes: int = 0
     soc_trace: list[float] = field(default_factory=list)
     switch_commands: list[str] = field(default_factory=list)
+    alarms: list[str] = field(default_factory=list)
     stop_reason: str | None = None
 
     @property
@@ -62,27 +65,42 @@ def simulate_night(
     start: dt.datetime | None = None,
     ticks: int = 17,
     soc_dies_after: int | None = None,
+    events: dict[int, dict[str, Any]] | None = None,
+    dead_charger: bool = False,
+    phases: int = 1,
 ) -> NightLog:
-    """Run the regulator against a simple battery model, tick by tick."""
+    """Run the regulator against a simple battery model, tick by tick.
+
+    ``events`` overrides world entities from a given tick onwards, which is how
+    mid-night upsets are expressed: ``{6: {STATUS: "fault"}}`` faults the
+    charger halfway through. ``dead_charger`` keeps the socket dark even when
+    the switch is on, so the watchdog has something to notice.
+    """
     now = start or moment(23, 0, day=31, month=7)
     soc = start_soc
     setpoint_value = 6.0
     switch_on = False
     soc_changed_at = now
     setpoint_changed_at = now - dt.timedelta(hours=5)
+    switch_changed_at = now - dt.timedelta(hours=1)
+    overrides: dict[str, Any] = {}
     log = NightLog()
 
     for index in range(ticks):
+        overrides.update((events or {}).get(index, {}))
         soc_alive = soc_dies_after is None or index < soc_dies_after
         delivered_current = setpoint_value * DELIVERY_RATIO if switch_on else 0.0
+        if dead_charger:
+            delivered_current = 0.0
         world = {
             SWITCH: State("on" if switch_on else "off",
-                          last_changed=now - dt.timedelta(hours=1)),
+                          last_changed=switch_changed_at),
             NUMBER: State(round(setpoint_value, 2),
                           {"min": 6.0, "max": 32.0, "step": 1.0},
                           setpoint_changed_at),
             STATUS: State("charging" if switch_on else "plugged_in", last_changed=now),
-            POWER: State(round(delivered_current * mains_voltage, 1), last_changed=now),
+            POWER: State(round(delivered_current * mains_voltage * phases, 1),
+                         last_changed=now),
             AMPERE: State(round(delivered_current, 2), last_changed=now),
             VOLTAGE: State(mains_voltage if switch_on else 0.0, last_changed=now),
             LINK: State("on", last_changed=now),
@@ -92,9 +110,14 @@ def simulate_night(
             TRACKER: State("home", last_changed=now),
             HOME: State(2, {"friendly_name": "Home"}, now),
         }
+        for entity_id, value in overrides.items():
+            world[entity_id] = (
+                value if isinstance(value, State) else State(value, last_changed=now)
+            )
 
         ctx = blueprint.evaluate(world=world, now=now, inputs=inputs)
         log.soc_trace.append(soc)
+        log.alarms.append(ctx["alarm_reason"])
 
         if ctx["should_charge"]:
             if ctx["needs_write"]:
@@ -103,18 +126,20 @@ def simulate_night(
                 log.writes += 1
             if not switch_on:
                 switch_on = True
+                switch_changed_at = now
                 log.switch_commands.append("on")
             log.setpoints.append(setpoint_value)
         elif ctx["must_stop"]:
             if switch_on:
                 switch_on = False
+                switch_changed_at = now
                 log.switch_commands.append("off")
                 log.stop_reason = ctx["stop_reason"]
 
         # Advance the battery model by one tick.
-        if switch_on:
+        if switch_on and not dead_charger:
             kwh = (
-                setpoint_value * DELIVERY_RATIO * mains_voltage
+                setpoint_value * DELIVERY_RATIO * mains_voltage * phases
                 * (TICK.total_seconds() / 3600) / 1000 * real_efficiency
             )
             gained = kwh / capacity * 100
@@ -303,3 +328,120 @@ def test_the_blueprint_survives_a_completely_empty_world(blueprint):
     ctx = blueprint.evaluate(world={}, now=moment(23, 0), inputs=minimal)
     assert ctx["must_stop"] is False
     assert ctx["num_min"] <= ctx["desired_current"] <= ctx["num_max"]
+
+
+# ------------------------------------------------------- upsets mid-night
+
+
+def test_a_car_arriving_mid_window_starts_charging_late(blueprint, night_inputs):
+    """A car that comes home at 01:00 must not wait for the next night."""
+    log = simulate_night(
+        blueprint,
+        night_inputs,
+        events={0: {TRACKER: "not_home"}, 4: {TRACKER: "home"}},
+    )
+    assert log.switch_commands.count("on") == 1
+    # Two hours of the window were spent waiting, so the regulator has to ask
+    # for far more current than it would on a full night - here, all of it.
+    assert log.setpoints[0] > 14
+    # It cannot make up the lost time entirely, but it must get close and it
+    # must never sit the night out waiting for a fresh window.
+    assert log.final_soc > 80
+    on_time = simulate_night(blueprint, night_inputs)
+    assert log.final_soc < on_time.final_soc
+
+
+def test_a_car_leaving_mid_night_ends_the_session(blueprint, night_inputs):
+    log = simulate_night(
+        blueprint, night_inputs, events={8: {TRACKER: "not_home"}}
+    )
+    assert log.switch_commands == ["on", "off"]
+    assert log.stop_reason == "car_not_home"
+    # Nothing is delivered after the car drives away.
+    assert log.soc_trace[-1] == pytest.approx(log.soc_trace[9], abs=0.01)
+
+
+def test_a_charger_fault_mid_night_stops_the_session(blueprint, night_inputs):
+    log = simulate_night(blueprint, night_inputs, events={6: {STATUS: "fault"}})
+    assert log.switch_commands == ["on", "off"]
+    assert log.stop_reason == "fault"
+    assert "charger_fault" in log.alarms
+
+
+def test_an_unplugged_cable_mid_night_stops_the_session(blueprint, night_inputs):
+    log = simulate_night(blueprint, night_inputs, events={6: {STATUS: "available"}})
+    assert log.switch_commands == ["on", "off"]
+    assert log.stop_reason == "unplugged"
+
+
+def test_the_charger_going_offline_pauses_the_commands(blueprint, night_inputs):
+    """No point talking to a charger Home Assistant cannot reach."""
+    offline = simulate_night(
+        blueprint,
+        night_inputs,
+        events={5: {LINK: "off"}, 9: {LINK: "on"}},
+    )
+    # The session is neither killed nor restarted once the link returns.
+    assert offline.switch_commands.count("on") == 1
+    assert offline.stop_reason in (None, "window_end", "target_reached")
+    assert offline.final_soc > 90
+
+
+def test_a_frozen_percentage_falls_back_without_stopping(blueprint, night_inputs):
+    """A cloud integration serving a stale cache is the nastiest failure: the
+    percentage looks alive, so the regulator would hold maximum current."""
+    inputs = dict(night_inputs)
+    inputs["soc_freeze_minutes"] = 60
+    log = simulate_night(
+        blueprint,
+        inputs,
+        events={4: {SOC: State("41.0", last_changed=moment(23, 0, day=31, month=7))}},
+    )
+    assert "car_data_frozen" in log.alarms
+    # Charging carries on; only the plan degrades to the reserve current.
+    assert log.switch_commands.count("on") == 1
+    assert log.stop_reason in (None, "window_end")
+    assert log.setpoints[-1] == 10  # the reserve current
+
+
+def test_a_dead_socket_raises_the_watchdog(blueprint, night_inputs):
+    """Switch on, cable in, and still no power: the charger refused the job."""
+    log = simulate_night(blueprint, night_inputs, dead_charger=True)
+    assert "no_power_while_on" in log.alarms
+    # The watchdog only reports. The session ends at the window edge like any
+    # other, never because the alarm fired.
+    assert log.stop_reason in (None, "window_end")
+
+
+def test_a_genuinely_cold_night_pins_the_current_at_the_maximum(
+    blueprint, night_inputs
+):
+    """Below the threshold the stretching is abandoned: a cold battery charges
+    slowly and unpredictably, so the safest plan is to charge flat out."""
+    inputs = dict(night_inputs)
+    inputs["outside_temp_sensor"] = OUTSIDE
+    inputs["cold_threshold"] = -5
+    log = simulate_night(
+        blueprint, inputs, events={0: {OUTSIDE: -23}}
+    )
+    assert log.setpoints[0] == 28
+    assert log.writes == 1
+    assert log.final_soc == 100
+
+
+def test_a_warm_night_leaves_the_cold_mode_alone(blueprint, night_inputs):
+    inputs = dict(night_inputs)
+    inputs["outside_temp_sensor"] = OUTSIDE
+    inputs["cold_threshold"] = -5
+    log = simulate_night(blueprint, inputs, events={0: {OUTSIDE: 12}})
+    assert log.setpoints[0] < 28
+
+
+def test_a_three_phase_night_reaches_the_target(blueprint, night_inputs):
+    """Three phases deliver three times the power, so the same battery fills at
+    a third of the amperage."""
+    inputs = dict(night_inputs)
+    inputs["phases"] = "3"
+    log = simulate_night(blueprint, inputs, phases=3)
+    assert log.setpoints[0] < 10
+    assert log.final_soc > 99

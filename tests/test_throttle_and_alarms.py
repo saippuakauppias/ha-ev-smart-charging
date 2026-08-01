@@ -19,38 +19,70 @@ from ha_sim import State, moment
 
 
 @pytest.mark.parametrize(
-    "age_seconds,expected_wait",
-    [(0, 60), (10, 50), (45, 15), (59, 1), (60, 0), (90, 0), (18000, 0)],
+    "age_seconds,elapsed",
+    [(0, False), (10, False), (45, False), (59, False), (60, True), (18000, True)],
 )
-def test_writes_wait_out_the_configured_gap(evaluate, age_seconds, expected_wait):
+def test_the_gap_is_measured_from_the_last_setpoint_change(
+    evaluate, age_seconds, elapsed
+):
     now = moment(23, 0)
     ctx = evaluate(now, **{NUMBER: setpoint(20, now, age_seconds=age_seconds)})
-    assert ctx["wait_before_write"] == expected_wait
+    assert ctx["gap_elapsed"] is elapsed
 
 
-def test_a_longer_gap_produces_a_longer_wait(evaluate):
+def test_a_longer_gap_holds_the_write_back_longer(evaluate):
     now = moment(23, 0)
     ctx = evaluate(
         now,
         inputs={"command_gap": 300},
         **{NUMBER: setpoint(20, now, age_seconds=60)},
     )
-    assert ctx["wait_before_write"] == 240
+    assert ctx["gap_elapsed"] is False
 
 
-def test_a_zero_gap_disables_waiting(evaluate):
+def test_a_zero_gap_never_holds_a_write_back(evaluate):
     now = moment(23, 0)
     ctx = evaluate(
         now, inputs={"command_gap": 0}, **{NUMBER: setpoint(20, now, age_seconds=0)}
     )
-    assert ctx["wait_before_write"] == 0
+    assert ctx["gap_elapsed"] is True
 
 
 def test_a_missing_setpoint_entity_does_not_block_forever(evaluate):
     world_now = moment(23, 0)
     ctx = evaluate(world_now, **{NUMBER: None})
     assert ctx["current_age"] == 999999
-    assert ctx["wait_before_write"] == 0
+    assert ctx["gap_elapsed"] is True
+
+
+def test_a_fresh_setpoint_defers_the_write_to_the_next_tick(evaluate):
+    """The throttle is a condition, not a pause.
+
+    An automation in ``restart`` mode cannot rely on a blocking delay: any
+    trigger firing during it kills the delay and the command that follows.
+    Holding the write back until the next recalculation is restart-proof.
+    """
+    now = moment(5, 0)
+    ctx = evaluate(
+        now,
+        **{
+            NUMBER: setpoint(10, now, age_seconds=5),
+            SOC: 40,
+            "switch.charger": charging_since(now),
+        },
+    )
+    assert ctx["want_write"] is True
+    assert ctx["gap_elapsed"] is False
+    assert ctx["needs_write"] is False
+
+
+def test_the_first_command_of_a_session_ignores_the_gap(evaluate):
+    """Otherwise starting a charge would be delayed by the whole gap."""
+    now = moment(23, 0)
+    ctx = evaluate(now, **{NUMBER: setpoint(10, now, age_seconds=0)})
+    assert ctx["switch_on"] is False
+    assert ctx["gap_elapsed"] is False
+    assert ctx["needs_write"] is True
 
 
 # ------------------------------------------------------------------ deadband

@@ -49,9 +49,10 @@ blueprint:
     предыдущего изменения. Многие станции плохо переносят частые команды.
 
 
-    Версия 1.0.0
+    Версия 1.1.0
 
   domain: automation
+  source_url: https://github.com/saippuakauppias/ha-ev-smart-charging/blob/main/blueprints/automation/ev_smart_charging/ev_smart_night_charging.yaml
   homeassistant:
     min_version: "2024.10.0"
 
@@ -337,6 +338,11 @@ blueprint:
             чтобы явно ошибочные данные не сломали расчёт). На свежей батарее
             поправка составляет пару процентов и всё равно съедается обратной
             связью регулятора; смысл появляется через несколько лет эксплуатации.
+
+
+            **Не перепутайте с сенсором процента заряда** — они оба измеряются
+            в процентах и часто стоят рядом в списке. SOH почти не меняется
+            день ото дня, заряд меняется постоянно.
           default: []
           selector:
             entity:
@@ -810,6 +816,25 @@ blueprint:
               unit_of_measurement: "%"
               mode: slider
 
+        emergency_hysteresis:
+          name: "Запас над аварийным порогом, %"
+          description: >
+            На сколько процентов выше аварийного порога нужно подняться, чтобы
+            аварийная дозарядка считалась выполненной. Без запаса зарядка
+            остановилась бы ровно на пороге и включалась бы снова при первом же
+            колебании процента.
+
+
+            Работает только когда аварийный заряд включён.
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 30
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+
         session_flag:
           name: "Флаг «сессия начата автоматизацией» (опционально)"
           description: >
@@ -817,9 +842,10 @@ blueprint:
             своей сессии и выключает при остановке.
 
 
-            Зачем: по окончании окна станция будет погашена только если сессию начинала
-            сама автоматизация. Если вы поставили машину на зарядку вручную днём,
-            наступление конца ночного окна её не прервёт.
+            Зачем: пока поле не заполнено, по окончании окна гасится любая зарядка,
+            в том числе начатая вручную. Если указать здесь переключатель,
+            автоматизация станет прерывать в конце окна только свои сессии,
+            а поставленную вручную днём — не тронет.
 
 
             Создаётся в **Настройки → Устройства и службы → Вспомогательные элементы**
@@ -993,6 +1019,7 @@ variables:
   require_home: !input require_home
   stop_at_window_end: !input stop_at_window_end
   emergency_soc: !input emergency_soc
+  emergency_hysteresis: !input emergency_hysteresis
   reset_current_on_stop: !input reset_current_on_stop
   debug_logging: !input debug_logging
 
@@ -1033,14 +1060,18 @@ variables:
   switch_on: "{{ is_state(e_switch, 'on') }}"
   charger_status: "{{ states(e_status) }}"
 
-  list_unplugged: "{{ s_unplugged.split(',') | map('trim') | list }}"
-  list_charging: "{{ s_charging.split(',') | map('trim') | list }}"
-  list_done: "{{ s_done.split(',') | map('trim') | list }}"
-  list_fault: "{{ s_fault.split(',') | map('trim') | list }}"
+  # Пустые элементы отбрасываем: иначе очищенное поле превратилось бы в [''],
+  # и проверка «статус не в списке» стала бы истинной для любого статуса.
+  list_unplugged: "{{ s_unplugged.split(',') | map('trim') | reject('eq', '') | list }}"
+  list_charging: "{{ s_charging.split(',') | map('trim') | reject('eq', '') | list }}"
+  list_done: "{{ s_done.split(',') | map('trim') | reject('eq', '') | list }}"
+  list_fault: "{{ s_fault.split(',') | map('trim') | reject('eq', '') | list }}"
 
-  plugged_in: >-
-    {{ true if charger_status in ['unknown', 'unavailable']
-       else charger_status not in list_unplugged }}
+  # Статус станции не читается. Это не повод считать кабель подключённым:
+  # начинать сессию вслепую нельзя. Но и рвать уже идущую зарядку из-за
+  # пропавшего сенсора не нужно — этим занимается status_known ниже.
+  status_known: "{{ charger_status not in ['unknown', 'unavailable', 'none', ''] }}"
+  plugged_in: "{{ charger_status not in list_unplugged if status_known else switch_on }}"
   charger_finished: "{{ charger_status in list_done }}"
   charger_fault: >-
     {{ charger_status in list_fault
@@ -1053,12 +1084,23 @@ variables:
   switch_age: >-
     {% set o = states[e_switch] %}
     {{ 0 if o is none else (now() - o.last_changed).total_seconds() | round(0) }}
-  wait_before_write: "{{ [command_gap | float(60) - current_age | float(0), 0] | max | int }}"
+  # Прошло ли достаточно времени с прошлой команды. Троттлинг сделан проверкой,
+  # а не паузой: автоматизация работает в режиме restart, и любой триггер
+  # (например, смена статуса станции) оборвал бы незавершённую паузу вместе
+  # с командой, которая должна была идти после неё. Проверка же просто
+  # откладывает запись до следующего пересчёта.
+  gap_elapsed: "{{ current_age | float(0) >= command_gap | float(60) }}"
+  switch_gap_elapsed: "{{ switch_age | float(0) >= command_gap | float(60) }}"
 
   # ============ местоположение ============
   tracker_state: "{{ states(e_tracker) if e_tracker != '' else 'unknown' }}"
   location_known: "{{ e_tracker != '' and tracker_state not in ['unknown', 'unavailable', 'none', ''] }}"
-  zone_name: "{{ state_attr(e_zone, 'friendly_name') | default('', true) }}"
+  # Трекер пишет в состояние имя зоны, поэтому сравниваем с friendly_name.
+  # Если имя почему-то недоступно, откатываемся на объектный id без префикса
+  # (zone.garage -> garage): иначе зона без имени навсегда запретила бы старт.
+  zone_name: >-
+    {% set fn = state_attr(e_zone, 'friendly_name') | default('', true) %}
+    {{ fn if fn != '' else e_zone.split('.') | last | replace('_', ' ') }}
   car_home: >-
     {% if not require_home or e_tracker == '' %}
       {{ true }}
@@ -1068,8 +1110,10 @@ variables:
       {{ (tracker_state == 'home' and e_zone == 'zone.home')
          or (zone_name != '' and tracker_state | lower == zone_name | lower) }}
     {% endif %}
-  allow_start: "{{ (not require_home) or e_tracker == '' or car_home }}"
-  allow_continue: "{{ allow_start or (not location_known) }}"
+  # Начать сессию можно только при известном местоположении, продолжить —
+  # даже если трекер замолчал: «GPS потерялся» это не «машина уехала».
+  allow_start: "{{ car_home }}"
+  allow_continue: "{{ car_home or (not location_known) }}"
 
   # ============ достоверность процента заряда ============
   # Шаг 1 — сущность вообще доступна? Это первое, что нужно проверять:
@@ -1124,9 +1168,17 @@ variables:
   effective_capacity: "{{ ((capacity_kwh | float(50)) * (soh_pct | float(100)) / 100) | round(3) }}"
 
   # ============ план по энергии сессии ============
+  # Счётчик должен обнуляться в начале сессии. Если вместо него подключили
+  # накопительный (device_class у обоих одинаковый, перепутать легко), значение
+  # окажется в разы больше цели — принимать его за «уже залито» нельзя: это
+  # навсегда и молча запретило бы зарядку. Такой сенсор считаем невалидным.
+  energy_plausible: >-
+    {{ states(e_energy) | float(-1) >= 0
+       and states(e_energy) | float(0) <= energy_target | float(0) * 3 }}
   energy_valid: >-
     {{ e_energy != '' and energy_target | float(0) > 0
-       and has_value(e_energy) and is_number(states(e_energy)) }}
+       and has_value(e_energy) and is_number(states(e_energy))
+       and energy_plausible }}
   energy_done: "{{ states(e_energy) | float(0) if energy_valid else -1 }}"
 
   plan_source: >-
@@ -1135,8 +1187,17 @@ variables:
   target_reached: >-
     {{ (soc_valid and soc >= target_soc | float(100))
        or (plan_source == 'energy' and energy_done >= energy_target | float(0)) }}
+  # Аварийная дозарядка с гистерезисом: начинаем ниже порога, а прекращаем
+  # только поднявшись на emergency_hysteresis выше него. Без этого зарядка
+  # остановилась бы ровно на пороге и задребезжала бы вокруг него.
   emergency: >-
-    {{ emergency_soc | float(0) > 0 and soc_valid and soc < emergency_soc | float(0) }}
+    {% if emergency_soc | float(0) <= 0 or not soc_valid %}
+      {{ false }}
+    {% elif switch_on %}
+      {{ soc < emergency_soc | float(0) + emergency_hysteresis | float(10) }}
+    {% else %}
+      {{ soc < emergency_soc | float(0) }}
+    {% endif %}
 
   # ============ холодная погода ============
   cold_mode: >-
@@ -1145,12 +1206,15 @@ variables:
        and states(e_otemp) | float(99) < cold_threshold | float(-100) }}
 
   # ============ окно ============
+  # Пустой список дней трактуем как «все дни»: снятые в интерфейсе галочки
+  # чаще означают недосмотр, чем желание навсегда отключить автоматизацию.
   weekday_ok: >-
     {% set st = today_at(start_time_str) %}
     {% set sp = today_at(stop_time_str) %}
     {% set n = now() %}
     {% set ref = (n - timedelta(days=1)) if (st > sp and n < sp) else n %}
-    {{ ['mon','tue','wed','thu','fri','sat','sun'][ref.weekday()] in weekdays }}
+    {{ weekdays | count == 0
+       or ['mon','tue','wed','thu','fri','sat','sun'][ref.weekday()] in weekdays }}
 
   in_window: >-
     {% set st = today_at(start_time_str) %}
@@ -1161,11 +1225,22 @@ variables:
     {% else %}{% set inside = true %}{% endif %}
     {{ inside and weekday_ok }}
 
+  # Сколько времени осталось до конца окна. За пределами окна планировать нечего:
+  # ближайший конец окна может отстоять почти на сутки, и растяжка выродилась бы
+  # в минимальный ток. Поэтому вне окна отдаём короткий горизонт — тогда
+  # аварийная дозарядка и режим «доработать начатое» идут максимальным током,
+  # а не размазываются на день вперёд.
   hours_left: >-
+    {% set st = today_at(start_time_str) %}
     {% set sp = today_at(stop_time_str) %}
-    {% set sp = (sp + timedelta(days=1)) if sp <= now() else sp %}
-    {% set sec = (sp - now()).total_seconds() - (reserve_minutes | float(0)) * 60 %}
-    {{ [sec / 3600, 0.0834] | max | round(4) }}
+    {% set n = now() %}
+    {% if in_window %}
+      {% set sp = (sp + timedelta(days=1)) if sp <= n else sp %}
+      {% set sec = (sp - n).total_seconds() - (reserve_minutes | float(0)) * 60 %}
+      {{ [sec / 3600, 0.0834] | max | round(4) }}
+    {% else %}
+      {{ 0.0834 }}
+    {% endif %}
 
   # ============ электрика ============
   # Уставка тока — то, что мы просим у станции.
@@ -1188,8 +1263,11 @@ variables:
       {{ 0 }}
     {% endif %}
 
+  # Диапазон правдоподобия одинаков для обоих измерений: сенсор, отдающий
+  # милливольты или мусор из битого регистра, не должен приниматься за истину —
+  # завышенное напряжение занизило бы ток до минимума на всю ночь.
   voltage_source: >-
-    {% if live_voltage >= 175 %}sensor
+    {% if live_voltage >= 175 and live_voltage <= 280 %}sensor
     {% elif derived_voltage >= 175 and derived_voltage <= 280 %}derived
     {% else %}fallback{% endif %}
   voltage: >-
@@ -1227,10 +1305,18 @@ variables:
   # выйти на границу диапазона: если план требует именно потолка (мы отстаём
   # от графика) или именно минимума, уставка пишется независимо от неё.
   at_boundary: "{{ desired_current >= num_max or desired_current <= num_min }}"
-  needs_write: >-
-    {{ (desired_current - current_now) | abs >= deadband | float(1)
+  # Уставку станции сравниваем с допуском в половину шага: станция может
+  # рапортовать 27.9 там, где мы просили 28, и точное сравнение заставляло бы
+  # переписывать уставку на каждом пересчёте в обход зоны нечувствительности.
+  setpoint_differs: "{{ (desired_current - current_now) | abs > cur_step | float(1) / 2 }}"
+  want_write: >-
+    {{ (desired_current - current_now) | abs >= deadband | float(3)
        or not switch_on
-       or (at_boundary and desired_current != current_now) }}
+       or (at_boundary and setpoint_differs) }}
+  # Записываем, только если пауза между командами уже выдержана. Первая команда
+  # сессии (станция ещё выключена) идёт без ожидания — иначе старт зарядки
+  # откладывался бы на весь интервал троттлинга.
+  needs_write: "{{ want_write and (gap_elapsed or not switch_on) }}"
 
   # ============ решение ============
   should_charge: >-
@@ -1262,13 +1348,18 @@ variables:
          or charger_finished
          or charger_fault
          or (require_home and location_known and not car_home)
+         or (status_known and not plugged_in)
          or ((not in_window) and stop_at_window_end and session_owned)
        ) }}
 
   # ============ контроль исправности ============
+  # «Включено, но ток не идёт». Верхняя граница по времени нужна, чтобы
+  # уведомление не повторялось на каждом пересчёте всю ночь: сообщаем только
+  # в первом окне после истечения таймаута, дальше молчим.
   no_power_alarm: >-
     {{ watchdog_minutes | float(0) > 0 and e_power != '' and switch_on and plugged_in
        and switch_age | float(0) >= watchdog_minutes | float(15) * 60
+       and switch_age | float(0) < watchdog_minutes | float(15) * 60 + 3600
        and has_value(e_power) and not charging_now }}
 
   car_says_charging: >-
@@ -1295,8 +1386,7 @@ actions:
       - condition: template
         value_template: "{{ alarm_reason != 'none' }}"
     then:
-      - choose: []
-        default: !input on_error_actions
+      - sequence: !input on_error_actions
 
   - choose:
       # ================= ВЕТКА 1: заряжаем =================
@@ -1316,28 +1406,20 @@ actions:
                   entity_id: "{{ e_mode_select }}"
                 data:
                   option: "{{ mode_value }}"
-              - delay:
-                  seconds: "{{ command_gap | int(60) }}"
 
-          # 2. уставка тока (не раньше, чем через паузу после прошлого изменения)
+          # 2. уставка тока. Пауза между командами уже учтена в needs_write,
+          # поэтому здесь блокирующих задержек нет: в режиме restart любой
+          # триггер оборвал бы их вместе с самой командой.
           - if:
               - condition: template
                 value_template: "{{ needs_write }}"
             then:
-              - delay:
-                  seconds: "{{ wait_before_write }}"
               - action: number.set_value
                 continue_on_error: true
                 target:
                   entity_id: "{{ e_current }}"
                 data:
                   value: "{{ desired_current }}"
-              - if:
-                  - condition: template
-                    value_template: "{{ not switch_on }}"
-                then:
-                  - delay:
-                      seconds: "{{ command_gap | int(60) }}"
 
           # 3. включение
           - if:
@@ -1356,8 +1438,7 @@ actions:
                     continue_on_error: true
                     target:
                       entity_id: "{{ e_session }}"
-              - choose: []
-                default: !input on_start_actions
+              - sequence: !input on_start_actions
 
           - if:
               - condition: template
@@ -1415,16 +1496,18 @@ actions:
                     статус станции={{ charger_status }}
                   entity_id: "{{ e_switch }}"
 
-          - choose: []
-            default: !input on_finish_actions
+          - sequence: !input on_finish_actions
 
-          # сброс уставки — последним и после паузы, чтобы не слать две команды подряд
+          # Сброс уставки — последним действием: выключение уже отправлено,
+          # и даже если этот шаг не доживёт до конца (режим restart), зарядка
+          # всё равно остановлена. Пауза короткая и фиксированная — она нужна
+          # лишь для того, чтобы станция успела переварить предыдущую команду.
           - if:
               - condition: template
                 value_template: "{{ reset_current_on_stop }}"
             then:
               - delay:
-                  seconds: "{{ command_gap | int(60) }}"
+                  seconds: 5
               - action: number.set_value
                 continue_on_error: true
                 target:

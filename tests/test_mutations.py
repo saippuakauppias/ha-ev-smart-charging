@@ -52,8 +52,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a running session is cut off when GPS drops out",
-        "{{ allow_start or (not location_known) }}",
-        "{{ allow_start }}",
+        "{{ car_home or (not location_known) }}",
+        "{{ car_home }}",
     ),
     (
         "charging starts while the car is away",
@@ -62,8 +62,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "command throttling is bypassed",
-        "{{ [command_gap | float(60) - current_age | float(0), 0] | max | int }}",
-        "{{ 0 }}",
+        '"{{ want_write and (gap_elapsed or not switch_on) }}"',
+        '"{{ want_write }}"',
     ),
     (
         "the window no longer spans midnight",
@@ -82,7 +82,7 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "implausible voltage readings are accepted",
-        "{% if live_voltage >= 175 %}sensor",
+        "{% if live_voltage >= 175 and live_voltage <= 280 %}sensor",
         "{% if live_voltage >= 100 %}sensor",
     ),
     (
@@ -102,14 +102,50 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "the time reserve is not subtracted from the budget",
-        "{% set sec = (sp - now()).total_seconds() "
-        "- (reserve_minutes | float(0)) * 60 %}",
-        "{% set sec = (sp - now()).total_seconds() %}",
+        "{% set sec = (sp - n).total_seconds() - (reserve_minutes | float(0)) * 60 %}",
+        "{% set sec = (sp - n).total_seconds() %}",
     ),
     (
         "the deadband blocks reaching the boundary current",
-        "or (at_boundary and desired_current != current_now) }}",
+        "or (at_boundary and setpoint_differs) }}",
         "}}",
+    ),
+    # ---- behaviour added or repaired in 1.1.0 ----
+    (
+        "the charge budget ignores the number of phases",
+        "{{ (watts / ([voltage * phases_n, 1] | max)) | round(3) }}",
+        "{{ (watts / ([voltage, 1] | max)) | round(3) }}",
+    ),
+    (
+        "charging efficiency is ignored when sizing the budget",
+        "{{ (delta / 100 * (effective_capacity | float(50))) "
+        "/ ([efficiency | float(88), 1] | max / 100) }}",
+        "{{ (delta / 100 * (effective_capacity | float(50))) }}",
+    ),
+    (
+        "the plan is stretched across the whole day outside the window",
+        "{{ 0.0834 }}\n    {% endif %}",
+        "{{ 24 }}\n    {% endif %}",
+    ),
+    (
+        "an unreadable charger status is taken for a plugged-in cable",
+        "{{ charger_status not in list_unplugged if status_known else switch_on }}",
+        "{{ charger_status not in list_unplugged if status_known else true }}",
+    ),
+    (
+        "a cumulative energy meter is mistaken for a session meter",
+        "and states(e_energy) | float(0) <= energy_target | float(0) * 3 }}",
+        "}}",
+    ),
+    (
+        "the emergency top-up stops dead on the threshold",
+        "{{ soc < emergency_soc | float(0) + emergency_hysteresis | float(10) }}",
+        "{{ soc < emergency_soc | float(0) }}",
+    ),
+    (
+        "an empty weekday list disables the automation for good",
+        "{{ weekdays | count == 0\n       or ['mon','tue','wed','thu','fri','sat','sun']",
+        "{{ ['mon','tue','wed','thu','fri','sat','sun']",
     ),
 ]
 

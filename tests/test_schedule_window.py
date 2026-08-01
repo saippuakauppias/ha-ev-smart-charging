@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from conftest import charging_since
+from conftest import SOC, charging_since
 from ha_sim import moment
 
 # 2026: 31 July is a Friday, 1 August a Saturday, 3 August a Monday.
@@ -75,6 +75,24 @@ def test_less_time_left_means_more_current(evaluate):
     assert late > early
 
 
+@pytest.mark.parametrize("hour", [9, 12, 17, 21])
+def test_outside_the_window_the_budget_does_not_span_the_whole_day(evaluate, hour):
+    """The next window end can be almost 24 hours away.
+
+    Planning against that horizon would stretch an emergency top-up — the only
+    thing that charges outside the window — down to the minimum current.
+    """
+    ctx = evaluate(moment(hour, 0))
+    assert ctx["in_window"] is False
+    assert ctx["hours_left"] < 1
+
+
+def test_an_emergency_outside_the_window_charges_flat_out(evaluate):
+    ctx = evaluate(moment(12, 0), inputs={"emergency_soc": 20}, **{SOC: 10})
+    assert ctx["emergency"] is True
+    assert ctx["desired_current"] == 28
+
+
 # ------------------------------------------------------------------ weekdays
 
 
@@ -106,6 +124,14 @@ def test_all_days_selected_by_default(evaluate):
     for day in (FRIDAY, SATURDAY, SUNDAY):
         month = 7 if day == FRIDAY else 8
         assert evaluate(moment(2, 0, day=day, month=month))["weekday_ok"] is True
+
+
+def test_an_empty_weekday_list_is_read_as_every_day(evaluate):
+    """Clearing every checkbox is far more often an oversight than a request
+    to disable the automation permanently."""
+    ctx = evaluate(moment(23, 30, day=FRIDAY, month=7), inputs={"weekdays": []})
+    assert ctx["weekday_ok"] is True
+    assert ctx["in_window"] is True
 
 
 def test_a_closed_day_stops_an_active_session(evaluate):
