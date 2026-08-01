@@ -1,0 +1,7 @@
+{
+  "name": "EV Smart Night Charging",
+  "content_in_root": false,
+  "filename": "ev_smart_night_charging.yaml",
+  "homeassistant": "2024.10.0",
+  "hide_default_branch": true
+}

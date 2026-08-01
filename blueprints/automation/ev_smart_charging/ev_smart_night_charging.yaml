@@ -1,0 +1,1433 @@
+blueprint:
+  name: "EV — умная ночная зарядка (растяжка тока на окно)"
+  description: >
+    Управляет зарядной станцией электромобиля или PHEV в заданном окне и **динамически
+    подбирает ток**, чтобы зарядка равномерно растянулась до времени окончания,
+    а не «выстреливала» максимумом в первый час и потом стояла.
+
+
+    Зачем это нужно: меньший ток — меньше нагрев кабеля и бортового зарядного
+    устройства, мягче режим для батареи и ровнее нагрузка на домашнюю сеть.
+    При этом машина всё равно готова к нужному времени.
+
+
+    Ничего не зашито жёстко — все сущности выбираются в интерфейсе. Blueprint
+    не привязан к конкретной марке автомобиля или модели зарядной станции.
+
+
+    **Два независимых способа посчитать, сколько ещё нужно залить:**
+
+    1. по проценту заряда батареи — (цель % − текущий %) × ёмкость;
+
+    2. по энергии сессии — целевые кВт·ч минус уже отданные счётчиком станции.
+       Работает вообще без связи с машиной.
+
+    Если доступны оба — приоритет у процента заряда. Если ни одного — резервный ток
+    до конца окна.
+
+
+    **Отказоустойчивость.** Данные о заряде проверяются по трём признакам, строго
+    в этом порядке:
+
+    1. *сущность недоступна* (`unavailable` / `unknown`) — самый частый случай,
+       обычно означает, что у интеграции автомобиля слетела авторизация и её нужно
+       переподключить; проверяется в первую очередь;
+
+    2. *данные устарели* — по сенсору времени с последнего выхода машины на связь;
+
+    3. *данные «замёрзли»* — процент не меняется, хотя станция реально отдаёт ток.
+       Нужно потому, что многие облачные интеграции при пропаже связи с машиной
+       не уходят в `unavailable`, а продолжают отдавать последнее закэшированное
+       значение сколь угодно долго.
+
+    При любом из трёх автоматизация не падает: план переключается на энергию сессии
+    либо на резервный ток, зарядка продолжается, а в хук ошибки уходит причина.
+
+
+    **Троттлинг.** Между любыми двумя командами станции выдерживается пауза,
+    и повторная запись тока невозможна раньше, чем через заданный интервал после
+    предыдущего изменения. Многие станции плохо переносят частые команды.
+
+
+    Версия 1.0.0
+
+  domain: automation
+  homeassistant:
+    min_version: "2024.10.0"
+
+  input:
+    section_charger:
+      name: "⚡ Зарядная станция"
+      icon: mdi:ev-station
+      collapsed: false
+      input:
+        charger_switch:
+          name: "Выключатель зарядки"
+          description: >
+            Сущность `switch`, которая разрешает или запрещает выдачу тока.
+            Если у станции несколько переключателей — нужен тот, что включает
+            саму зарядку, а не подсветку, звук или блокировку кабеля.
+          selector:
+            entity:
+              filter:
+                - domain: switch
+
+        charger_current_number:
+          name: "Уставка тока"
+          description: >
+            Сущность `number`, задающая ток зарядки в амперах. В интерфейсе выглядит
+            как ползунок или поле ввода со значением вроде 16 и единицами «A».
+          selector:
+            entity:
+              filter:
+                - domain: number
+
+        charger_status_sensor:
+          name: "Сенсор статуса станции"
+          description: >
+            Текстовый сенсор, показывающий, чем станция занята прямо сейчас.
+            Как найти: **Инструменты разработчика → Состояния**, отфильтруйте по имени
+            станции и ищите сенсор, значение которого — слово, а не число:
+            `available`, `plugged_in`, `charging`, `charged`, `fault` и подобные.
+            Ниже, в разделе «Расшифровка статусов», эти слова нужно будет перечислить.
+
+
+            Не подойдут сенсоры с числами (ток, мощность, энергия, напряжение) —
+            для них есть отдельные поля.
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+
+        charger_power_sensor:
+          name: "Сенсор мощности станции, Вт (опционально)"
+          description: >
+            Нужен для двух вещей: watchdog «включено, но ток не идёт» и определение
+            факта зарядки для детектора замёрзших данных. Если сенсора нет,
+            оба механизма переключатся на статус станции — чуть менее надёжно,
+            но работоспособно.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: power
+
+        charger_current_sensor:
+          name: "Сенсор фактического тока, А (опционально)"
+          description: >
+            Ток, который станция реально отдаёт прямо сейчас. Не путайте с уставкой
+            тока выше: уставка — это то, что мы просим, а этот сенсор — то, что
+            получилось на самом деле. Значения обычно немного расходятся.
+
+
+            Используется для вычисления реального напряжения под нагрузкой
+            и для записи в журнал. На выбор уставки напрямую не влияет.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: current
+
+        charger_voltage_sensor:
+          name: "Сенсор напряжения (опционально)"
+          description: >
+            Живое напряжение фазы. Если задан и показывает больше 175 В — используется
+            в расчёте вместо номинального. Порог 175 В выбран потому, что ниже этого
+            значения зарядка в любом случае должна отключаться по недопустимому
+            напряжению, поэтому такие показания означают либо простой станции,
+            либо неисправность, и в расчёт их брать нельзя.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: voltage
+
+        session_energy_sensor:
+          name: "Сенсор энергии текущей сессии, кВт·ч (опционально)"
+          description: >
+            Счётчик энергии, который обнуляется в начале каждой новой зарядки
+            (у станций часто называется «Last charge» или «Текущая сессия»).
+            Не путайте с общим накопительным счётчиком за всё время — тот не подойдёт.
+            Используется как запасной способ планирования, если процент заряда
+            машины недоступен.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: energy
+
+        charger_link_sensor:
+          name: "Сенсор доступности станции (опционально)"
+          description: >
+            Бинарный сенсор с классом «подключение», который показывает, отвечает ли
+            сама станция. У локальных интеграций обычно называется «Связь», «Онлайн»
+            или «Соединение» и имеет значения «Подключено / Отключено».
+
+
+            Пока он выключен, автоматизация не пытается слать команды в пустоту.
+            Речь именно о связи Home Assistant со станцией, а не станции с автомобилем.
+            Если такого сенсора у станции нет — оставьте поле пустым, автоматизация
+            будет считать станцию доступной всегда.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: binary_sensor
+                  device_class: connectivity
+
+        charger_problem_sensor:
+          name: "Сенсор неисправности станции (опционально)"
+          description: >
+            Бинарный сенсор с классом «проблема». Если включён — зарядка
+            останавливается и срабатывает хук ошибки.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: binary_sensor
+                  device_class: problem
+
+        charger_mode_select:
+          name: "Выбор режима зарядки (опционально)"
+          description: >
+            Если у станции есть собственные режимы (немедленная зарядка, зарядка
+            до процента, по внутреннему расписанию) — укажите эту сущность.
+            Перед стартом режим будет принудительно выставлен в ручной, иначе
+            встроенный планировщик станции перебьёт наши команды и вы получите
+            конфликт двух расписаний.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: select
+
+        charger_mode_value:
+          name: "Значение режима для ручного управления"
+          description: >
+            Точное значение из списка выше, соответствующее немедленной зарядке
+            без внутреннего расписания станции.
+          default: immediate
+          selector:
+            text:
+
+    section_status_map:
+      name: "🔤 Расшифровка статусов станции"
+      icon: mdi:format-list-bulleted
+      collapsed: true
+      input:
+        status_unplugged:
+          name: "Статусы «кабель не подключён»"
+          description: >
+            Через запятую. При таком статусе зарядка не стартует.
+            Посмотреть возможные значения можно в истории сенсора статуса.
+          default: "available, fault_unplugged"
+          selector:
+            text:
+
+        status_charging:
+          name: "Статусы «идёт зарядка»"
+          description: "Запасной признак работы, если сенсор мощности не задан."
+          default: "charging"
+          selector:
+            text:
+
+        status_done:
+          name: "Статусы «заряд завершён»"
+          description: "При таком статусе автоматизация считает задачу выполненной."
+          default: "charged"
+          selector:
+            text:
+
+        status_fault:
+          name: "Статусы «неисправность»"
+          default: "fault"
+          selector:
+            text:
+
+    section_car:
+      name: "🚗 Автомобиль"
+      icon: mdi:car-electric
+      collapsed: false
+      input:
+        car_battery_sensor:
+          name: "Сенсор процента заряда батареи, % (опционально)"
+          description: >
+            **Внимание: это процент заряда (SoC), а не здоровье батареи (SOH).**
+            Это две разные сущности, которые легко перепутать — обе в процентах.
+
+
+            Нужный сенсор показывает, насколько батарея заряжена прямо сейчас:
+            значение меняется в процессе зарядки и поездки, обычно от 10 до 100.
+            Сенсор здоровья батареи почти не меняется, обновляется раз в несколько
+            часов и у новой батареи может показывать больше 100 % — он задаётся
+            отдельным полем ниже и для расчёта заряда не годится.
+
+
+            Проверьте в **Инструментах разработчика → Состояния**, что значение
+            действительно растёт во время зарядки.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: battery
+
+        car_stale_sensor:
+          name: "Сенсор времени с последнего выхода машины на связь, сек — рекомендуется"
+          description: >
+            Показывает, сколько секунд назад автомобиль последний раз связывался
+            с сервером (в интеграциях называется «Последний пинг», `last_ping`).
+            Без него отличить свежие данные от закэшированных гораздо труднее:
+            сенсор процента заряда при пропаже связи часто остаётся «доступным»
+            и продолжает отдавать старое значение.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: duration
+
+        car_stale_max:
+          name: "Порог устаревания данных, сек"
+          description: >
+            Если машина не выходила на связь дольше этого времени, процент заряда
+            считается недостоверным.
+          default: 1800
+          selector:
+            number:
+              min: 60
+              max: 86400
+              step: 60
+              unit_of_measurement: с
+              mode: box
+
+        soc_freeze_minutes:
+          name: "Детектор «замёрзшего» процента заряда, мин (0 — выкл)"
+          description: >
+            Третий, независимый контроль достоверности — работает даже когда сенсор
+            выше не задан. Если станция реально отдаёт мощность, а процент заряда
+            не менялся дольше этого времени, значит данные протухли.
+
+
+            Ориентир для порога: на 6 А (примерно 1.3 кВт) один процент батареи
+            на 43 кВт·ч набирается около 20 минут, на 16 А — около 8. Ставьте
+            с большим запасом, чтобы не ловить ложные срабатывания.
+          default: 90
+          selector:
+            number:
+              min: 0
+              max: 480
+              step: 10
+              unit_of_measurement: мин
+              mode: box
+
+        soh_sensor:
+          name: "Сенсор здоровья батареи (SOH), % — опционально"
+          description: >
+            Необязательно, по умолчанию пусто — так и оставьте, если сомневаетесь.
+
+
+            Здоровье батареи показывает, сколько ёмкости осталось относительно
+            заводской. Если задать, полезная ёмкость будет считаться как
+            «ёмкость × SOH / 100» (значение зажимается в диапазон 50–130 %,
+            чтобы явно ошибочные данные не сломали расчёт). На свежей батарее
+            поправка составляет пару процентов и всё равно съедается обратной
+            связью регулятора; смысл появляется через несколько лет эксплуатации.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+
+        car_charging_binary:
+          name: "Бинарный сенсор «машина заряжается» (опционально)"
+          description: >
+            Сенсор с классом «зарядка батареи» со стороны автомобиля.
+            Используется только для диагностики: позволяет в уведомлении отличить
+            «станция не отдаёт ток» от «машина отказалась брать ток».
+            На управление не влияет.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: binary_sensor
+                  device_class: battery_charging
+
+        car_tracker:
+          name: "Трекер местоположения машины (опционально)"
+          description: >
+            Сущность `device_tracker` автомобиля. Нужна, чтобы станция не начала
+            заряжать чужую машину, подключённую к вашему разъёму.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: device_tracker
+
+        home_zone:
+          name: "Зона, в которой разрешена зарядка"
+          description: >
+            Обычно домашняя зона. Home Assistant сам определяет попадание в неё
+            по координатам трекера.
+          default: zone.home
+          selector:
+            entity:
+              filter:
+                - domain: zone
+
+        require_home:
+          name: "Заряжать только когда машина в зоне"
+          description: >
+            Автоматизация следит за трекером постоянно: если в момент начала окна
+            машина ещё не приехала или GPS временно сбоил и показывал неверную
+            позицию — зарядка стартует сразу, как только машина окажется в зоне,
+            не дожидаясь следующей ночи.
+
+
+            Уже идущая сессия при потере геолокации не прерывается: это отличает
+            «трекер замолчал» от «машина уехала».
+          default: true
+          selector:
+            boolean:
+
+        battery_capacity:
+          name: "Полезная ёмкость батареи, кВт·ч"
+          description: >
+            Паспортная ёмкость тяговой батареи. Смотрите в характеристиках вашей
+            версии автомобиля. Точность не критична — регулятор самокорректируется
+            на каждом пересчёте, ошибка в пару киловатт-часов просто сместит
+            первый расчёт.
+          default: 43
+          selector:
+            number:
+              min: 1
+              max: 200
+              step: 0.01
+              unit_of_measurement: kWh
+              mode: box
+
+    section_target:
+      name: "🎯 Цель зарядки"
+      icon: mdi:target
+      collapsed: false
+      input:
+        target_soc:
+          name: "Целевой заряд, %"
+          description: >
+            До какого процента заряжать. Работает только если задан сенсор процента
+            заряда батареи. Для ежедневных поездок многие производители рекомендуют
+            80–90 %, до 100 % имеет смысл заряжать перед дальней дорогой.
+          default: 100
+          selector:
+            number:
+              min: 10
+              max: 100
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+
+        session_energy_target:
+          name: "Целевая энергия сессии, кВт·ч (0 — выключено)"
+          description: >
+            Запасной план на случай, когда процент заряда недоступен: заряжать,
+            пока счётчик станции не отдаст столько киловатт-часов.
+            Ориентир: нужные вам проценты × ёмкость / 100, плюс примерно 12 % на потери.
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 200
+              step: 0.5
+              unit_of_measurement: kWh
+              mode: box
+
+    section_schedule:
+      name: "🕒 Окно зарядки"
+      icon: mdi:clock-outline
+      collapsed: false
+      input:
+        start_time:
+          name: "Время старта"
+          description: >
+            Начало окна, внутри которого разрешена зарядка.
+
+
+            Если у вас двухтарифный или трёхзонный счётчик, окно имеет смысл
+            совместить с ночной зоной — разница в цене киловатт-часа обычно
+            двукратная, а зарядка это самый крупный потребитель в доме.
+            **Точное время начала и окончания ночной зоны уточните у своей
+            энергосбытовой организации**: оно различается по регионам, зависит
+            от модели счётчика и может меняться при переходе на сезонное время.
+            Не полагайтесь на распространённое «23:00–07:00» без проверки.
+
+
+            Небольшой запас после начала льготной зоны не помешает: часы счётчика
+            и Home Assistant могут расходиться на несколько минут.
+          default: "23:00:00"
+          selector:
+            time:
+
+        stop_time:
+          name: "Время окончания"
+          description: >
+            Конец окна. Может приходиться на следующие сутки — переход через
+            полночь обрабатывается корректно.
+          default: "07:00:00"
+          selector:
+            time:
+
+        weekdays:
+          name: "Дни недели"
+          description: >
+            Учитывается день, в который окно начинается: ночь с пятницы
+            на субботу считается пятницей.
+          default: [mon, tue, wed, thu, fri, sat, sun]
+          selector:
+            select:
+              multiple: true
+              options:
+                - {label: Понедельник, value: mon}
+                - {label: Вторник, value: tue}
+                - {label: Среда, value: wed}
+                - {label: Четверг, value: thu}
+                - {label: Пятница, value: fri}
+                - {label: Суббота, value: sat}
+                - {label: Воскресенье, value: sun}
+
+        time_reserve_minutes:
+          name: "Резерв времени, мин"
+          description: >
+            План строится так, чтобы закончить на столько минут раньше конца окна.
+            Компенсирует замедление заряда на последних процентах и задержки
+            облачных сервисов. Если окно совпадает с льготным тарифом, резерв
+            заодно страхует от заезда в дорогую зону.
+          default: 30
+          selector:
+            number:
+              min: 0
+              max: 180
+              step: 5
+              unit_of_measurement: мин
+              mode: slider
+
+        recalc_interval:
+          name: "Период пересчёта тока"
+          description: >
+            Как часто сверять факт с планом и корректировать ток. Чаще — точнее
+            отслеживание, но больше команд станции.
+          default: "/30"
+          selector:
+            select:
+              options:
+                - {label: "каждые 10 минут", value: "/10"}
+                - {label: "каждые 15 минут", value: "/15"}
+                - {label: "каждые 20 минут", value: "/20"}
+                - {label: "каждые 30 минут", value: "/30"}
+
+    section_power:
+      name: "🔌 Ток и электрика"
+      icon: mdi:flash
+      collapsed: false
+      input:
+        min_current:
+          name: "Минимальный ток, А"
+          description: >
+            Жёсткая нижняя граница — ниже автоматизация не выставит никогда,
+            даже если по расчёту можно было бы заряжать медленнее.
+            Слишком малый ток некоторые машины просто не принимают;
+            стандарт для однофазной зарядки начинается с 6 А.
+          default: 6
+          selector:
+            number:
+              min: 1
+              max: 80
+              step: 1
+              unit_of_measurement: A
+              mode: box
+
+        max_current:
+          name: "Максимальный ток, А"
+          description: >
+            Жёсткая верхняя граница — выше автоматизация не выставит никогда.
+            Ориентируйтесь на самое слабое звено всей цепи: номинал автомата,
+            сечение кабеля до станции, возможности самой станции и бортового
+            зарядного устройства машины. Длительная нагрузка должна быть заметно
+            ниже номинала защитного автомата.
+          default: 28
+          selector:
+            number:
+              min: 1
+              max: 80
+              step: 1
+              unit_of_measurement: A
+              mode: box
+
+        current_step:
+          name: "Дискретность тока, А"
+          description: >
+            С каким шагом станция принимает значения тока. Расчётное значение
+            округляется вверх до кратного этому числу.
+          default: 1
+          selector:
+            number:
+              min: 1
+              max: 5
+              step: 1
+              unit_of_measurement: A
+              mode: box
+
+        fallback_current:
+          name: "Резервный ток, А"
+          description: >
+            Используется, когда посчитать план нечем: и процент заряда, и энергия
+            сессии недоступны. Выберите умеренное значение, при котором ночи
+            обычно хватает для полной зарядки.
+          default: 10
+          selector:
+            number:
+              min: 1
+              max: 80
+              step: 1
+              unit_of_measurement: A
+              mode: box
+
+        nominal_voltage:
+          name: "Запасное напряжение сети, В"
+          description: >
+            **Используется только тогда, когда реальное напряжение измерить нечем.**
+            Приоритет источников такой:
+
+
+            1. сенсор напряжения станции, если он показывает больше 175 В;
+
+            2. вычисление из мощности и фактического тока (мощность / ток / число фаз),
+               если заданы оба сенсора и зарядка идёт;
+
+            3. и только если ни то ни другое не доступно — это поле.
+
+
+            Зачем оно нужно вообще: в момент, когда автоматизация решает начать
+            зарядку, станция ещё обесточена и сенсор напряжения показывает ноль —
+            измерять пока нечего, а ток для первой команды посчитать уже надо.
+            Дальше, со второго пересчёта, в дело идут живые данные и это значение
+            больше не участвует.
+
+
+            Поэтому точность здесь некритична: ошибка повлияет только на первую
+            уставку тока в сессии и будет исправлена при следующем пересчёте.
+            Всё же лучше поставить своё типичное напряжение, а не паспортные 230 В —
+            тогда и первый расчёт будет близок к истине.
+
+
+            На запуск и остановку зарядки не влияет никак. Защита от недопустимого
+            напряжения — задача реле напряжения в щите, а не автоматизации.
+          default: 230
+          selector:
+            number:
+              min: 100
+              max: 260
+              step: 1
+              unit_of_measurement: V
+              mode: box
+
+        phases:
+          name: "Число фаз"
+          description: "Сколько фаз реально задействовано в зарядке."
+          default: "1"
+          selector:
+            select:
+              options:
+                - {label: "1 фаза", value: "1"}
+                - {label: "3 фазы", value: "3"}
+
+        efficiency:
+          name: "КПД зарядки, %"
+          description: >
+            Доля энергии из розетки, которая реально доходит до батареи. Остальное
+            уходит в нагрев кабеля, бортового зарядного устройства и самой батареи.
+            Зимой обычно 80–85 %, летом 90–93 %. Занижать безопаснее: ток получится
+            чуть выше плана и машина точно успеет.
+          default: 88
+          selector:
+            number:
+              min: 60
+              max: 100
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+
+        current_deadband:
+          name: "Минимальное изменение тока для записи, А"
+          description: >
+            Насколько новое расчётное значение должно отличаться от **текущей уставки**,
+            чтобы автоматизация вообще стала переписывать её на станции.
+
+
+            Важно: сравнивается уставка с уставкой. Фактический ток, который станция
+            показывает в своих сенсорах, в этом сравнении не участвует вообще.
+            Расхождение вида «просим 20 А, идёт 18.3 А» — это нормально и на решение
+            о перезаписи не влияет, дребезга из-за него не будет.
+
+
+            Смысл параметра в другом: при пересчёте раз в полчаса расчёт почти всегда
+            даёт чуть другое число, и без ограничения станция получала бы команду
+            каждый раз ради изменения на доли ампера.
+
+
+            Исключение: если расчёт требует ровно максимума или ровно минимума,
+            уставка записывается независимо от этого параметра. Иначе при большом
+            значении ток мог бы застрять в паре ампер от потолка и не дотянуть
+            до цели холодной ночью.
+          default: 3
+          selector:
+            number:
+              min: 0
+              max: 10
+              step: 1
+              unit_of_measurement: A
+              mode: slider
+
+        outside_temp_sensor:
+          name: "Сенсор температуры на улице (опционально)"
+          description: >
+            Подойдёт любой источник: сенсор автомобиля, метеостанция, погодная
+            интеграция. Нужен только для режима холодной погоды ниже.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: sensor
+                  device_class: temperature
+
+        cold_threshold:
+          name: "Порог холодной погоды, °C (−100 — выключено)"
+          description: >
+            Ниже этой температуры растяжка отключается и ток задирается на максимум.
+
+
+            Причина: на морозе заметная часть энергии уходит на прогрев батареи,
+            а не в её заряд. Медленная зарядка в таких условиях означает, что
+            греется всё то же самое, только дольше и с худшим итоговым результатом.
+            Выгоднее отдать нужные киловатт-часы быстро.
+          default: -100
+          selector:
+            number:
+              min: -100
+              max: 20
+              step: 1
+              unit_of_measurement: "°C"
+              mode: box
+
+    section_throttle:
+      name: "🐢 Троттлинг команд и контроль исправности"
+      icon: mdi:speedometer-slow
+      collapsed: false
+      input:
+        command_gap:
+          name: "Минимальная пауза между командами, сек"
+          description: >
+            Выдерживается и внутри одного прогона (смена режима, затем уставка тока,
+            затем включение), и между прогонами: повторная запись тока не произойдёт
+            раньше, чем через это время после предыдущего изменения.
+
+
+            Многие станции плохо переносят частые команды: теряют их, уходят
+            в ошибку или изнашивают память настроек.
+          default: 60
+          selector:
+            number:
+              min: 0
+              max: 600
+              step: 5
+              unit_of_measurement: с
+              mode: box
+
+        watchdog_minutes:
+          name: "Контроль «включено, но тока нет», мин (0 — выкл)"
+          description: >
+            Если станция включена дольше этого времени, кабель подключён,
+            а мощность ниже порога — вызываются действия при ошибке.
+            Ловит ситуацию, когда команда прошла, но зарядка так и не началась.
+          default: 15
+          selector:
+            number:
+              min: 0
+              max: 120
+              step: 5
+              unit_of_measurement: мин
+              mode: box
+
+        no_power_threshold:
+          name: "Порог «тока нет», Вт"
+          description: >
+            Ниже этой мощности считается, что зарядка фактически не идёт.
+            Небольшое потребление самой станции в простое не должно превышать порог.
+          default: 200
+          selector:
+            number:
+              min: 0
+              max: 3000
+              step: 50
+              unit_of_measurement: W
+              mode: box
+
+    section_behavior:
+      name: "⚙️ Поведение и защита"
+      icon: mdi:shield-check
+      collapsed: true
+      input:
+        stop_at_window_end:
+          name: "Выключать зарядку в конце окна"
+          description: >
+            Включено — по окончании окна станция гасится, даже если цель не достигнута.
+            Так нужно при льготном тарифе, чтобы не заезжать в дорогую зону.
+
+
+            Выключено — начатая сессия продолжается до достижения цели,
+            ток при этом уйдёт к минимуму. Новые сессии вне окна всё равно
+            не стартуют.
+          default: true
+          selector:
+            boolean:
+
+        emergency_soc:
+          name: "Аварийный заряд, % (0 — выключено)"
+          description: >
+            Если заряд упал ниже этого значения, зарядка стартует максимальным током
+            независимо от окна и времени суток. Машина при этом всё равно должна быть
+            в зоне и подключена кабелем. Страховка на случай, когда утром нужно
+            срочно уехать.
+          default: 0
+          selector:
+            number:
+              min: 0
+              max: 60
+              step: 1
+              unit_of_measurement: "%"
+              mode: slider
+
+        session_flag:
+          name: "Флаг «сессия начата автоматизацией» (опционально)"
+          description: >
+            Вспомогательный `input_boolean`, который автоматизация включает при старте
+            своей сессии и выключает при остановке.
+
+
+            Зачем: по окончании окна станция будет погашена только если сессию начинала
+            сама автоматизация. Если вы поставили машину на зарядку вручную днём,
+            наступление конца ночного окна её не прервёт.
+
+
+            Создаётся в **Настройки → Устройства и службы → Вспомогательные элементы**
+            как обычный переключатель.
+          default: []
+          selector:
+            entity:
+              filter:
+                - domain: input_boolean
+
+        reset_current_on_stop:
+          name: "Сбрасывать ток на минимум при остановке"
+          description: >
+            Полезно, если вы иногда включаете станцию вручную и не хотите,
+            чтобы она стартовала с максимальным током, оставшимся с ночи.
+          default: false
+          selector:
+            boolean:
+
+        debug_logging:
+          name: "Записывать ход зарядки в журнал"
+          description: >
+            После каждого пересчёта добавляет запись в **журнал Home Assistant**
+            (Logbook, в истории сущности выключателя зарядки): текущий процент заряда
+            и его возраст, сколько киловатт-часов осталось залить, сколько времени
+            остаётся, напряжение, как изменился ток и почему.
+
+
+            Помогает разобраться, почему ночью ток оказался не таким, как ожидалось.
+            Записи занимают место в базе — при постоянной работе можно выключить.
+          default: false
+          selector:
+            boolean:
+
+    section_hooks:
+      name: "🔔 Уведомления"
+      icon: mdi:bell-outline
+      collapsed: true
+      input:
+        on_start_actions:
+          name: "Действия при старте сессии"
+          description: >
+            Например, отправка уведомления на телефон. Доступные переменные:
+            soc, soc_valid, plan_source, needed_kwh, desired_current, hours_left,
+            charger_status, cold_mode.
+          default: []
+          selector:
+            action:
+
+        on_finish_actions:
+          name: "Действия при завершении сессии"
+          description: "Те же переменные, плюс stop_reason и target_missed."
+          default: []
+          selector:
+            action:
+
+        on_error_actions:
+          name: "Действия при неисправности"
+          description: >
+            Вызывается при неисправности станции, отсутствии тока при включённой
+            зарядке, недоступности или устаревании данных о заряде.
+            Доступна переменная alarm_reason с причиной.
+          default: []
+          selector:
+            action:
+
+mode: restart
+
+trigger_variables:
+  tv_tracker: !input car_tracker
+  tv_battery: !input car_battery_sensor
+  tv_target: !input target_soc
+  tv_zone: !input home_zone
+
+triggers:
+  - trigger: time
+    at: !input start_time
+    id: window_start
+
+  - trigger: time
+    at: !input stop_time
+    id: window_stop
+
+  - trigger: time_pattern
+    minutes: !input recalc_interval
+    id: tick
+
+  - trigger: state
+    entity_id: !input charger_status_sensor
+    id: charger_status
+
+  - trigger: homeassistant
+    event: start
+    id: ha_start
+
+  # Машина оказалась в разрешённой зоне — неважно, приехала она только что
+  # или GPS наконец перестал врать. Срабатывает на переход «не в зоне» → «в зоне»,
+  # поэтому зарядка начнётся сразу, а не со следующего окна.
+  - trigger: template
+    id: car_arrived
+    value_template: >-
+      {% set t = tv_tracker | join('') %}
+      {% if t == '' %}
+        {{ false }}
+      {% else %}
+        {% set z = tv_zone | join('') %}
+        {% set zn = state_attr(z, 'friendly_name') | default('', true) %}
+        {{ (states(t) == 'home' and z == 'zone.home')
+           or (zn != '' and states(t) | lower == zn | lower) }}
+      {% endif %}
+
+  - trigger: template
+    id: target_hit
+    value_template: >-
+      {% set b = tv_battery | join('') %}
+      {{ b != '' and has_value(b) and is_number(states(b))
+         and states(b) | float(0) >= tv_target | float(100) }}
+
+variables:
+  # ================= сырые входы =================
+  i_switch: !input charger_switch
+  i_current: !input charger_current_number
+  i_status: !input charger_status_sensor
+  i_power: !input charger_power_sensor
+  i_ampere: !input charger_current_sensor
+  i_voltage: !input charger_voltage_sensor
+  i_energy: !input session_energy_sensor
+  i_link: !input charger_link_sensor
+  i_problem: !input charger_problem_sensor
+  i_mode_select: !input charger_mode_select
+  i_battery: !input car_battery_sensor
+  i_stale: !input car_stale_sensor
+  i_soh: !input soh_sensor
+  i_otemp: !input outside_temp_sensor
+  i_car_charging: !input car_charging_binary
+  i_tracker: !input car_tracker
+  i_zone: !input home_zone
+  i_session: !input session_flag
+
+  mode_value: !input charger_mode_value
+  s_unplugged: !input status_unplugged
+  s_charging: !input status_charging
+  s_done: !input status_done
+  s_fault: !input status_fault
+
+  start_time_str: !input start_time
+  stop_time_str: !input stop_time
+  weekdays: !input weekdays
+  reserve_minutes: !input time_reserve_minutes
+
+  target_soc: !input target_soc
+  energy_target: !input session_energy_target
+  capacity_kwh: !input battery_capacity
+  cold_threshold: !input cold_threshold
+  stale_max: !input car_stale_max
+  soc_freeze_minutes: !input soc_freeze_minutes
+
+  in_min_current: !input min_current
+  in_max_current: !input max_current
+  in_step: !input current_step
+  fallback_current: !input fallback_current
+  nominal_voltage: !input nominal_voltage
+  i_phases: !input phases
+  efficiency: !input efficiency
+  deadband: !input current_deadband
+
+  command_gap: !input command_gap
+  watchdog_minutes: !input watchdog_minutes
+  no_power_threshold: !input no_power_threshold
+
+  require_home: !input require_home
+  stop_at_window_end: !input stop_at_window_end
+  emergency_soc: !input emergency_soc
+  reset_current_on_stop: !input reset_current_on_stop
+  debug_logging: !input debug_logging
+
+  # ============ нормализация в entity_id или '' ============
+  e_switch: "{{ i_switch | join('') }}"
+  e_current: "{{ i_current | join('') }}"
+  e_status: "{{ i_status | join('') }}"
+  e_power: "{{ i_power | join('') }}"
+  e_ampere: "{{ i_ampere | join('') }}"
+  e_voltage: "{{ i_voltage | join('') }}"
+  e_energy: "{{ i_energy | join('') }}"
+  e_link: "{{ i_link | join('') }}"
+  e_problem: "{{ i_problem | join('') }}"
+  e_mode_select: "{{ i_mode_select | join('') }}"
+  e_battery: "{{ i_battery | join('') }}"
+  e_stale: "{{ i_stale | join('') }}"
+  e_soh: "{{ i_soh | join('') }}"
+  e_otemp: "{{ i_otemp | join('') }}"
+  e_car_charging: "{{ i_car_charging | join('') }}"
+  e_tracker: "{{ i_tracker | join('') }}"
+  e_zone: "{{ i_zone | join('') }}"
+  e_session: "{{ i_session | join('') }}"
+
+  phases_n: "{{ i_phases | int(1) }}"
+
+  # ============ жёсткие границы тока ============
+  # Приоритет у значений из настроек; атрибуты сущности могут только сузить диапазон.
+  lim_min: "{{ in_min_current | float(6) }}"
+  lim_max: "{{ [in_max_current | float(28), in_min_current | float(6)] | max }}"
+  ent_min: "{{ state_attr(e_current, 'min') | float(0) }}"
+  ent_max: "{{ state_attr(e_current, 'max') | float(9999) }}"
+  num_min: "{{ [lim_min, ent_min] | max }}"
+  num_max: "{{ [[lim_max, ent_max] | min, [lim_min, ent_min] | max] | max }}"
+  cur_step: "{{ [in_step | float(1), 0.1] | max }}"
+
+  # ============ состояние станции ============
+  charger_online: "{{ e_link == '' or is_state(e_link, 'on') }}"
+  switch_on: "{{ is_state(e_switch, 'on') }}"
+  charger_status: "{{ states(e_status) }}"
+
+  list_unplugged: "{{ s_unplugged.split(',') | map('trim') | list }}"
+  list_charging: "{{ s_charging.split(',') | map('trim') | list }}"
+  list_done: "{{ s_done.split(',') | map('trim') | list }}"
+  list_fault: "{{ s_fault.split(',') | map('trim') | list }}"
+
+  plugged_in: >-
+    {{ true if charger_status in ['unknown', 'unavailable']
+       else charger_status not in list_unplugged }}
+  charger_finished: "{{ charger_status in list_done }}"
+  charger_fault: >-
+    {{ charger_status in list_fault
+       or (e_problem != '' and is_state(e_problem, 'on')) }}
+
+  # ============ возраст последних команд ============
+  current_age: >-
+    {% set o = states[e_current] %}
+    {{ 999999 if o is none else (now() - o.last_changed).total_seconds() | round(0) }}
+  switch_age: >-
+    {% set o = states[e_switch] %}
+    {{ 0 if o is none else (now() - o.last_changed).total_seconds() | round(0) }}
+  wait_before_write: "{{ [command_gap | float(60) - current_age | float(0), 0] | max | int }}"
+
+  # ============ местоположение ============
+  tracker_state: "{{ states(e_tracker) if e_tracker != '' else 'unknown' }}"
+  location_known: "{{ e_tracker != '' and tracker_state not in ['unknown', 'unavailable', 'none', ''] }}"
+  zone_name: "{{ state_attr(e_zone, 'friendly_name') | default('', true) }}"
+  car_home: >-
+    {% if not require_home or e_tracker == '' %}
+      {{ true }}
+    {% elif not location_known %}
+      {{ false }}
+    {% else %}
+      {{ (tracker_state == 'home' and e_zone == 'zone.home')
+         or (zone_name != '' and tracker_state | lower == zone_name | lower) }}
+    {% endif %}
+  allow_start: "{{ (not require_home) or e_tracker == '' or car_home }}"
+  allow_continue: "{{ allow_start or (not location_known) }}"
+
+  # ============ достоверность процента заряда ============
+  # Шаг 1 — сущность вообще доступна? Это первое, что нужно проверять:
+  # чаще всего недоступность означает слетевшую авторизацию интеграции.
+  soc_present: >-
+    {{ e_battery != '' and has_value(e_battery) and is_number(states(e_battery)) }}
+  soc_unavailable: "{{ e_battery != '' and not soc_present }}"
+
+  # Шаг 2 — данные не устарели?
+  # Если сам сенсор возраста пуст или недоступен, это не повод хоронить процент
+  # заряда: полагаемся на детектор заморозки ниже.
+  soc_fresh: >-
+    {% if e_stale == '' %}
+      {{ true }}
+    {% elif not has_value(e_stale) or not is_number(states(e_stale)) %}
+      {{ true }}
+    {% else %}
+      {{ states(e_stale) | float(9e9) <= stale_max | float(1800) }}
+    {% endif %}
+
+  # Шаг 3 — процент не «замёрз» при реально идущем токе?
+  charging_now: >-
+    {% if e_power != '' and has_value(e_power) %}
+      {{ states(e_power) | float(0) > no_power_threshold | float(200) }}
+    {% else %}
+      {{ charger_status in list_charging }}
+    {% endif %}
+  soc_age_min: >-
+    {% set o = states[e_battery] if e_battery != '' else none %}
+    {{ 0 if o is none else ((now() - o.last_changed).total_seconds() / 60) | round(1) }}
+  soc_frozen: >-
+    {{ soc_freeze_minutes | float(0) > 0 and soc_present
+       and switch_on and charging_now
+       and soc_age_min | float(0) >= soc_freeze_minutes | float(90) }}
+
+  soc_valid: "{{ soc_present and soc_fresh and not soc_frozen }}"
+  soc: "{{ states(e_battery) | float(-1) if soc_valid else -1 }}"
+
+  soc_problem: >-
+    {% if soc_unavailable %}unavailable
+    {% elif soc_present and not soc_fresh %}stale
+    {% elif soc_frozen %}frozen
+    {% else %}none{% endif %}
+
+  # ============ полезная ёмкость с поправкой на здоровье батареи ============
+  soh_pct: >-
+    {% if e_soh != '' and has_value(e_soh) and is_number(states(e_soh)) %}
+      {{ [[states(e_soh) | float(100), 50] | max, 130] | min }}
+    {% else %}
+      {{ 100 }}
+    {% endif %}
+  effective_capacity: "{{ ((capacity_kwh | float(50)) * (soh_pct | float(100)) / 100) | round(3) }}"
+
+  # ============ план по энергии сессии ============
+  energy_valid: >-
+    {{ e_energy != '' and energy_target | float(0) > 0
+       and has_value(e_energy) and is_number(states(e_energy)) }}
+  energy_done: "{{ states(e_energy) | float(0) if energy_valid else -1 }}"
+
+  plan_source: >-
+    {% if soc_valid %}soc{% elif energy_valid %}energy{% else %}none{% endif %}
+
+  target_reached: >-
+    {{ (soc_valid and soc >= target_soc | float(100))
+       or (plan_source == 'energy' and energy_done >= energy_target | float(0)) }}
+  emergency: >-
+    {{ emergency_soc | float(0) > 0 and soc_valid and soc < emergency_soc | float(0) }}
+
+  # ============ холодная погода ============
+  cold_mode: >-
+    {{ e_otemp != '' and cold_threshold | float(-100) > -100
+       and has_value(e_otemp) and is_number(states(e_otemp))
+       and states(e_otemp) | float(99) < cold_threshold | float(-100) }}
+
+  # ============ окно ============
+  weekday_ok: >-
+    {% set st = today_at(start_time_str) %}
+    {% set sp = today_at(stop_time_str) %}
+    {% set n = now() %}
+    {% set ref = (n - timedelta(days=1)) if (st > sp and n < sp) else n %}
+    {{ ['mon','tue','wed','thu','fri','sat','sun'][ref.weekday()] in weekdays }}
+
+  in_window: >-
+    {% set st = today_at(start_time_str) %}
+    {% set sp = today_at(stop_time_str) %}
+    {% set n = now() %}
+    {% if st < sp %}{% set inside = (st <= n and n < sp) %}
+    {% elif st > sp %}{% set inside = (n >= st or n < sp) %}
+    {% else %}{% set inside = true %}{% endif %}
+    {{ inside and weekday_ok }}
+
+  hours_left: >-
+    {% set sp = today_at(stop_time_str) %}
+    {% set sp = (sp + timedelta(days=1)) if sp <= now() else sp %}
+    {% set sec = (sp - now()).total_seconds() - (reserve_minutes | float(0)) * 60 %}
+    {{ [sec / 3600, 0.0834] | max | round(4) }}
+
+  # ============ электрика ============
+  # Уставка тока — то, что мы просим у станции.
+  current_now: "{{ states(e_current) | float(0) }}"
+  # Фактический ток — то, что реально идёт. Обычно немного меньше уставки.
+  actual_current: >-
+    {{ states(e_ampere) | float(0) if (e_ampere != '' and has_value(e_ampere)) else 0 }}
+  actual_power: >-
+    {{ states(e_power) | float(0) if (e_power != '' and has_value(e_power)) else 0 }}
+
+  # Источник №1 — прямое измерение.
+  live_voltage: >-
+    {{ states(e_voltage) | float(0) if (e_voltage != '' and has_value(e_voltage)) else 0 }}
+  # Источник №2 — вычисление из мощности и фактического тока.
+  # Даёт реальное напряжение под нагрузкой даже без сенсора напряжения.
+  derived_voltage: >-
+    {% if actual_current > 0.5 and actual_power > no_power_threshold | float(200) %}
+      {{ (actual_power / (actual_current * phases_n)) | round(1) }}
+    {% else %}
+      {{ 0 }}
+    {% endif %}
+
+  voltage_source: >-
+    {% if live_voltage >= 175 %}sensor
+    {% elif derived_voltage >= 175 and derived_voltage <= 280 %}derived
+    {% else %}fallback{% endif %}
+  voltage: >-
+    {% if voltage_source == 'sensor' %}{{ live_voltage }}
+    {% elif voltage_source == 'derived' %}{{ derived_voltage }}
+    {% else %}{{ nominal_voltage | float(230) }}{% endif %}
+
+  # ============ расчёт ============
+  needed_kwh: >-
+    {% if plan_source == 'soc' %}
+      {% set delta = [target_soc | float(100) - soc, 0] | max %}
+      {{ (delta / 100 * (effective_capacity | float(50))) / ([efficiency | float(88), 1] | max / 100) }}
+    {% elif plan_source == 'energy' %}
+      {{ [energy_target | float(0) - energy_done, 0] | max }}
+    {% else %}
+      {{ 0 }}
+    {% endif %}
+
+  calc_current: >-
+    {% if emergency or cold_mode %}
+      {{ num_max }}
+    {% elif plan_source == 'none' %}
+      {{ fallback_current | float(10) }}
+    {% else %}
+      {% set watts = needed_kwh * 1000 / hours_left %}
+      {{ (watts / ([voltage * phases_n, 1] | max)) | round(3) }}
+    {% endif %}
+
+  desired_current: >-
+    {% set c = [[calc_current | float(6), num_min] | max, num_max] | min %}
+    {% set snapped = ((c / cur_step) | round(0, 'ceil')) * cur_step %}
+    {{ [[snapped, num_min] | max, num_max] | min | round(2) }}
+
+  # Зона нечувствительности гасит косметические правки, но не должна мешать
+  # выйти на границу диапазона: если план требует именно потолка (мы отстаём
+  # от графика) или именно минимума, уставка пишется независимо от неё.
+  at_boundary: "{{ desired_current >= num_max or desired_current <= num_min }}"
+  needs_write: >-
+    {{ (desired_current - current_now) | abs >= deadband | float(1)
+       or not switch_on
+       or (at_boundary and desired_current != current_now) }}
+
+  # ============ решение ============
+  should_charge: >-
+    {{ charger_online
+       and (in_window or emergency or (switch_on and not stop_at_window_end))
+       and plugged_in
+       and not target_reached
+       and not charger_finished
+       and not charger_fault
+       and (allow_continue if switch_on else allow_start) }}
+
+  session_owned: "{{ e_session == '' or is_state(e_session, 'on') }}"
+
+  stop_reason: >-
+    {% if charger_fault %}fault
+    {% elif target_reached %}target_reached
+    {% elif charger_finished %}charger_reports_charged
+    {% elif require_home and location_known and not car_home %}car_not_home
+    {% elif not plugged_in %}unplugged
+    {% elif not in_window %}window_end
+    {% else %}other{% endif %}
+
+  target_missed: "{{ not target_reached and not charger_finished }}"
+
+  must_stop: >-
+    {{ switch_on and not should_charge and charger_online
+       and (
+         target_reached
+         or charger_finished
+         or charger_fault
+         or (require_home and location_known and not car_home)
+         or ((not in_window) and stop_at_window_end and session_owned)
+       ) }}
+
+  # ============ контроль исправности ============
+  no_power_alarm: >-
+    {{ watchdog_minutes | float(0) > 0 and e_power != '' and switch_on and plugged_in
+       and switch_age | float(0) >= watchdog_minutes | float(15) * 60
+       and has_value(e_power) and not charging_now }}
+
+  car_says_charging: >-
+    {{ 'unknown' if e_car_charging == '' or not has_value(e_car_charging)
+       else ('yes' if is_state(e_car_charging, 'on') else 'no') }}
+
+  # О проблемах с данными сообщаем только во время своей сессии,
+  # чтобы не слать уведомления круглосуточно, пока машина просто спит.
+  data_alarm: "{{ switch_on and soc_problem != 'none' }}"
+
+  alarm_reason: >-
+    {% if charger_fault %}charger_fault
+    {% elif no_power_alarm and car_says_charging == 'no' %}car_refused_charge
+    {% elif no_power_alarm and car_says_charging == 'yes' %}charger_reports_no_power_but_car_charging
+    {% elif no_power_alarm %}no_power_while_on
+    {% elif data_alarm and soc_problem == 'unavailable' %}car_data_unavailable_check_integration_auth
+    {% elif data_alarm and soc_problem == 'stale' %}car_data_stale
+    {% elif data_alarm and soc_problem == 'frozen' %}car_data_frozen
+    {% else %}none{% endif %}
+
+actions:
+  # ---------- контроль исправности ----------
+  - if:
+      - condition: template
+        value_template: "{{ alarm_reason != 'none' }}"
+    then:
+      - choose: []
+        default: !input on_error_actions
+
+  - choose:
+      # ================= ВЕТКА 1: заряжаем =================
+      - conditions:
+          - condition: template
+            value_template: "{{ should_charge }}"
+        sequence:
+          # 1. режим станции -> ручной
+          - if:
+              - condition: template
+                value_template: >-
+                  {{ e_mode_select != '' and not is_state(e_mode_select, mode_value) }}
+            then:
+              - action: select.select_option
+                continue_on_error: true
+                target:
+                  entity_id: "{{ e_mode_select }}"
+                data:
+                  option: "{{ mode_value }}"
+              - delay:
+                  seconds: "{{ command_gap | int(60) }}"
+
+          # 2. уставка тока (не раньше, чем через паузу после прошлого изменения)
+          - if:
+              - condition: template
+                value_template: "{{ needs_write }}"
+            then:
+              - delay:
+                  seconds: "{{ wait_before_write }}"
+              - action: number.set_value
+                continue_on_error: true
+                target:
+                  entity_id: "{{ e_current }}"
+                data:
+                  value: "{{ desired_current }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ not switch_on }}"
+                then:
+                  - delay:
+                      seconds: "{{ command_gap | int(60) }}"
+
+          # 3. включение
+          - if:
+              - condition: template
+                value_template: "{{ not switch_on }}"
+            then:
+              - action: switch.turn_on
+                continue_on_error: true
+                target:
+                  entity_id: "{{ e_switch }}"
+              - if:
+                  - condition: template
+                    value_template: "{{ e_session != '' }}"
+                then:
+                  - action: input_boolean.turn_on
+                    continue_on_error: true
+                    target:
+                      entity_id: "{{ e_session }}"
+              - choose: []
+                default: !input on_start_actions
+
+          - if:
+              - condition: template
+                value_template: "{{ debug_logging }}"
+            then:
+              - action: logbook.log
+                continue_on_error: true
+                data:
+                  name: "Зарядка EV"
+                  message: >-
+                    план={{ plan_source }}{{ ' МОРОЗ' if cold_mode else '' }} |
+                    заряд={{ soc if soc_valid else 'н/д (' ~ soc_problem ~ ')' }}%
+                    (не менялся {{ soc_age_min }} мин) |
+                    ёмкость {{ effective_capacity }} кВт·ч |
+                    нужно {{ needed_kwh | round(2) }} кВт·ч за {{ hours_left }} ч |
+                    U={{ voltage | round(0) }} В ({{ voltage_source }}) × {{ phases_n }} ф |
+                    уставка {{ current_now }} → {{ desired_current }} А
+                    (возраст {{ current_age }} с), по факту идёт
+                    {{ actual_current if e_ampere != '' else 'н/д' }} А |
+                    статус={{ charger_status }} | машина заряжается: {{ car_says_charging }}
+                  entity_id: "{{ e_switch }}"
+
+      # ================= ВЕТКА 2: останавливаем =================
+      - conditions:
+          - condition: template
+            value_template: "{{ must_stop }}"
+        sequence:
+          # выключение идёт первым и без задержки — это команда безопасности
+          - action: switch.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ e_switch }}"
+
+          - if:
+              - condition: template
+                value_template: "{{ e_session != '' }}"
+            then:
+              - action: input_boolean.turn_off
+                continue_on_error: true
+                target:
+                  entity_id: "{{ e_session }}"
+
+          - if:
+              - condition: template
+                value_template: "{{ debug_logging }}"
+            then:
+              - action: logbook.log
+                continue_on_error: true
+                data:
+                  name: "Зарядка EV"
+                  message: >-
+                    Стоп ({{ stop_reason }}).
+                    Заряд={{ soc if soc_valid else 'н/д' }}%,
+                    отдано {{ energy_done if energy_valid else 'н/д' }} кВт·ч,
+                    статус станции={{ charger_status }}
+                  entity_id: "{{ e_switch }}"
+
+          - choose: []
+            default: !input on_finish_actions
+
+          # сброс уставки — последним и после паузы, чтобы не слать две команды подряд
+          - if:
+              - condition: template
+                value_template: "{{ reset_current_on_stop }}"
+            then:
+              - delay:
+                  seconds: "{{ command_gap | int(60) }}"
+              - action: number.set_value
+                continue_on_error: true
+                target:
+                  entity_id: "{{ e_current }}"
+                data:
+                  value: "{{ num_min }}"

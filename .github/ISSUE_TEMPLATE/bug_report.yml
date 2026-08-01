@@ -1,0 +1,52 @@
+---
+name: Сообщить о проблеме
+description: Что-то работает не так, как описано
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: Что произошло
+      description: Опишите ожидаемое и фактическое поведение.
+    validations:
+      required: true
+
+  - type: input
+    id: ha-version
+    attributes:
+      label: Версия Home Assistant
+      placeholder: "2026.7.1"
+    validations:
+      required: true
+
+  - type: input
+    id: blueprint-version
+    attributes:
+      label: Версия блюпринта
+      description: Указана в конце описания блюпринта.
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: input
+    id: charger
+    attributes:
+      label: Зарядная станция и способ подключения
+      placeholder: "модель, интеграция"
+
+  - type: textarea
+    id: logbook
+    attributes:
+      label: Записи журнала
+      description: >-
+        Включите «Записывать ход зарядки в журнал» и приложите строки
+        за проблемную ночь. Это самая полезная информация.
+      render: text
+
+  - type: textarea
+    id: trace
+    attributes:
+      label: Трассировка автоматизации
+      description: >-
+        Настройки → Автоматизации → нужная автоматизация → Трассировки →
+        Скачать. Уберите оттуда координаты и токены перед публикацией.
