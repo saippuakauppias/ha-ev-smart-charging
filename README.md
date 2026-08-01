@@ -98,7 +98,7 @@
 2. Вставьте ссылку на файл блюпринта в этом репозитории:
 
 ```
-https://github.com/saippuakauppias/ha-ev-smart-charging/blob/main/blueprints/automation/ev_smart_charging/ev_smart_night_charging.yaml
+https://raw.githubusercontent.com/saippuakauppias/ha-ev-smart-charging/refs/heads/main/blueprints/automation/ev_smart_charging/ev_smart_night_charging.yaml
 ```
 
 ### Вариант 2 — вручную
