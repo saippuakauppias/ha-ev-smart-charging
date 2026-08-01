@@ -240,19 +240,32 @@ def test_a_cumulative_meter_is_not_mistaken_for_a_session_meter(evaluate):
     assert ctx["should_charge"] is True
 
 
-def test_a_session_meter_just_over_the_target_is_still_trusted(evaluate):
-    """Overshooting the target slightly is normal and must not look cumulative."""
+@pytest.mark.parametrize(
+    "target,delivered",
+    [(20, 21.5), (2, 7.0), (5, 30.0), (1, 25.0)],
+)
+def test_a_session_meter_that_overshoots_the_target_is_still_trusted(
+    evaluate, target, delivered
+):
+    """Overshooting is normal and must not be read as a cumulative meter.
+
+    A small target overshoots by a lot in relative terms - a 2 kWh target on a
+    night that delivered 7 kWh is threefold - so the plausibility check has to
+    be measured against the battery, not against the target. Rejecting the
+    meter here would leave the session running past its goal.
+    """
     ctx = evaluate(
         moment(23, 0),
         inputs={
             "car_battery_sensor": [],
             "session_energy_sensor": ENERGY,
-            "session_energy_target": 20,
+            "session_energy_target": target,
         },
-        **{ENERGY: 21.5},
+        **{ENERGY: delivered, "switch.charger": charging_since(moment(23, 0))},
     )
     assert ctx["energy_valid"] is True
     assert ctx["target_reached"] is True
+    assert ctx["must_stop"] is True
 
 
 @pytest.mark.parametrize("reading", ["inf", "-inf", "nan"])

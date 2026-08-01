@@ -6,8 +6,10 @@ range configured in the UI, whatever the arithmetic produces.
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
-from conftest import NUMBER, SOC, charging_since, setpoint
+from conftest import NUMBER, OUTSIDE, SOC, charging_since, setpoint
 from ha_sim import State, moment
 
 
@@ -62,18 +64,49 @@ def test_entity_limits_cannot_push_below_the_configured_minimum(evaluate):
     assert ctx["desired_current"] == 10
 
 
-def test_inverted_bounds_collapse_safely(evaluate):
-    """Minimum above maximum is a misconfiguration; it must not crash or invert."""
+def test_inverted_bounds_collapse_towards_the_maximum(evaluate):
+    """Minimum above maximum is a misconfiguration, and the two fields are easy
+    to swap in the UI. It must collapse downwards: lowering the floor is safe,
+    raising the ceiling above what the wiring allows is not."""
     ctx = evaluate(moment(23, 0), inputs={"min_current": 20, "max_current": 10})
-    assert ctx["num_min"] == 20
-    assert ctx["num_max"] == 20
-    assert ctx["desired_current"] == 20
+    assert ctx["num_min"] == 10
+    assert ctx["num_max"] == 10
+    assert ctx["desired_current"] == 10
+
+
+def test_swapped_bounds_never_exceed_the_intended_ceiling(evaluate):
+    """The dangerous case: 80 in the minimum field, 6 in the maximum."""
+    ctx = evaluate(moment(23, 0), inputs={"min_current": 80, "max_current": 6})
+    assert ctx["desired_current"] == 6
 
 
 @pytest.mark.parametrize("step,expected_multiple", [(1, 1), (2, 2), (3, 3), (5, 5)])
 def test_current_snaps_to_the_configured_step(evaluate, step, expected_multiple):
     ctx = evaluate(moment(23, 0), inputs={"current_step": step})
     assert ctx["desired_current"] % expected_multiple == 0
+
+
+@pytest.mark.parametrize("maximum,step", [(28, 5), (28, 3), (16, 5), (30, 4), (32, 5)])
+def test_the_setpoint_is_a_multiple_of_the_step_even_at_the_ceiling(
+    evaluate, maximum, step
+):
+    """A charger with a coarse step rejects anything in between.
+
+    Clamping to a ceiling that is not itself a multiple of the step produces
+    exactly such a value (28 with a step of 5). The charger then rounds it to
+    its own liking, our setpoint never matches what we asked for, and the
+    boundary rule rewrites it on every single recalculation.
+    """
+    now = moment(5, 30)
+    ctx = evaluate(
+        now,
+        inputs={"min_current": 6, "max_current": maximum, "current_step": step},
+        **{SOC: 20, "switch.charger": charging_since(now)},
+    )
+    assert ctx["calc_current"] > maximum, "the scenario must demand the ceiling"
+    assert ctx["num_max"] % step == 0
+    assert ctx["desired_current"] % step == 0
+    assert ctx["desired_current"] <= maximum
 
 
 def test_step_rounds_up_so_the_plan_is_never_short(evaluate):
@@ -93,8 +126,8 @@ def test_entity_step_attribute_is_ignored(evaluate):
 def test_cold_weather_overrides_the_stretch_and_goes_to_maximum(evaluate):
     ctx = evaluate(
         moment(23, 0),
-        inputs={"outside_temp_sensor": "sensor.outside", "cold_threshold": -5},
-        **{"sensor.outside": -23},
+        inputs={"outside_temp_sensor": OUTSIDE, "cold_threshold": -5},
+        **{OUTSIDE: -23},
     )
     assert ctx["cold_mode"] is True
     assert ctx["desired_current"] == 28
@@ -103,8 +136,8 @@ def test_cold_weather_overrides_the_stretch_and_goes_to_maximum(evaluate):
 def test_cold_weather_is_off_by_default(evaluate):
     ctx = evaluate(
         moment(23, 0),
-        inputs={"outside_temp_sensor": "sensor.outside"},
-        **{"sensor.outside": -23},
+        inputs={"outside_temp_sensor": OUTSIDE},
+        **{OUTSIDE: -23},
     )
     assert ctx["cold_mode"] is False
 
@@ -112,10 +145,56 @@ def test_cold_weather_is_off_by_default(evaluate):
 def test_unavailable_temperature_does_not_trigger_cold_mode(evaluate):
     ctx = evaluate(
         moment(23, 0),
-        inputs={"outside_temp_sensor": "sensor.outside", "cold_threshold": -5},
-        **{"sensor.outside": State("unavailable")},
+        inputs={"outside_temp_sensor": OUTSIDE, "cold_threshold": -5},
+        **{OUTSIDE: State("unavailable")},
     )
     assert ctx["cold_mode"] is False
+
+
+def test_a_stale_temperature_is_accepted_unless_a_limit_is_set(evaluate):
+    """Weather integrations refresh rarely, and in winter the reading can stay
+    the same for half a night. Age checking is therefore off by default."""
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        inputs={"outside_temp_sensor": OUTSIDE, "cold_threshold": -5},
+        **{OUTSIDE: State(-23, last_changed=now - dt.timedelta(hours=9))},
+    )
+    assert ctx["otemp_fresh"] is True
+    assert ctx["cold_mode"] is True
+
+
+def test_a_configured_age_limit_rejects_a_stuck_temperature(evaluate):
+    """A sensor frozen at -20 would otherwise pin the current at maximum and
+    switch the stretching off for good."""
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        inputs={
+            "outside_temp_sensor": OUTSIDE,
+            "cold_threshold": -5,
+            "cold_temp_max_age": 120,
+        },
+        **{OUTSIDE: State(-23, last_changed=now - dt.timedelta(hours=9))},
+    )
+    assert ctx["otemp_age_min"] == 540.0
+    assert ctx["otemp_fresh"] is False
+    assert ctx["cold_mode"] is False
+
+
+def test_a_fresh_temperature_passes_the_age_limit(evaluate):
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        inputs={
+            "outside_temp_sensor": OUTSIDE,
+            "cold_threshold": -5,
+            "cold_temp_max_age": 120,
+        },
+        **{OUTSIDE: State(-23, last_changed=now - dt.timedelta(minutes=10))},
+    )
+    assert ctx["otemp_fresh"] is True
+    assert ctx["cold_mode"] is True
 
 
 def test_emergency_charge_uses_the_maximum(evaluate):

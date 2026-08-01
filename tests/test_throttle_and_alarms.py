@@ -6,6 +6,7 @@ import pytest
 from conftest import (
     AMPERE,
     CAR_CHARGING,
+    MODE,
     NUMBER,
     POWER,
     SOC,
@@ -180,13 +181,15 @@ def test_watchdog_can_be_disabled(evaluate):
     assert ctx["no_power_alarm"] is False
 
 
-def test_watchdog_needs_a_power_sensor(evaluate):
+def test_no_alarm_without_a_power_sensor_while_the_status_says_charging(evaluate):
+    """The status is the fallback evidence that current is flowing."""
     now = moment(1, 0)
     ctx = evaluate(
         now,
         inputs={"charger_power_sensor": []},
         **{"switch.charger": charging_since(now, 40)},
     )
+    assert ctx["charging_now"] is True
     assert ctx["no_power_alarm"] is False
 
 
@@ -230,3 +233,57 @@ def test_a_charger_fault_outranks_every_other_alarm(evaluate):
         },
     )
     assert ctx["alarm_reason"] == "charger_fault"
+
+
+def test_the_watchdog_works_without_a_power_sensor(evaluate):
+    """Without the sensor, "is current flowing" falls back to the charger
+    status. Requiring the sensor would silently disable the watchdog for
+    exactly the setups that have the least instrumentation."""
+    now = moment(1, 0)
+    ctx = evaluate(
+        now,
+        inputs={"charger_power_sensor": []},
+        **{STATUS: "plugged_in", "switch.charger": charging_since(now, 40)},
+    )
+    assert ctx["charging_now"] is False
+    assert ctx["no_power_alarm"] is True
+    assert ctx["alarm_reason"] == "no_power_while_on"
+
+
+def test_the_alarm_stops_repeating_after_an_hour(evaluate):
+    """Reporting once is help; reporting every recalculation until morning is
+    a reason to mute the notification channel."""
+    now = moment(1, 0)
+    ctx = evaluate(now, **{POWER: 0, "switch.charger": charging_since(now, 300)})
+    assert ctx["no_power_alarm"] is False
+
+
+# ------------------------------------------------- throttling other commands
+
+
+def test_a_charger_that_refuses_to_switch_on_is_not_hammered(evaluate):
+    """If turn_on has no effect the switch stays off, and without throttling
+    both the command and the start notification would repeat on every tick."""
+    now = moment(23, 0)
+    fresh = evaluate(now, **{"switch.charger": State("off", last_changed=now)})
+    assert fresh["should_charge"] is True
+    assert fresh["needs_turn_on"] is False
+
+    settled = evaluate(now)
+    assert settled["needs_turn_on"] is True
+
+
+def test_an_empty_mode_value_is_never_written(evaluate):
+    """An empty option is rejected by the charger, and continue_on_error would
+    swallow the failure, leaving the mode never actually set."""
+    ctx = evaluate(
+        moment(23, 0),
+        inputs={"charger_mode_value": ""},
+        **{MODE: "scheduled_charge"},
+    )
+    assert ctx["needs_mode_write"] is False
+
+
+def test_the_mode_is_written_when_it_genuinely_differs(evaluate):
+    ctx = evaluate(moment(23, 0), **{MODE: "scheduled_charge"})
+    assert ctx["needs_mode_write"] is True

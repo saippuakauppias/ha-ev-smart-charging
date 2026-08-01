@@ -7,7 +7,9 @@ README, so a surviving mutation means that promise is untested.
 
 This is the check that found the missing outer clamp on the current: the value
 was clamped twice, and the inner clamp masked the outer one for every ceiling
-that happened to be a multiple of the step.
+that happened to be a multiple of the step. It later caught two regressions
+introduced by fixes of its own: a plausibility check that rejected a correct
+energy meter, and a ceiling that stopped being reachable at coarse step sizes.
 
 Runs the full suite once per mutation, so it is marked ``slow``. Skip it with::
 
@@ -30,10 +32,15 @@ REPO_ROOT = BLUEPRINT_PATH.parents[3]
 #: ``(label, original_fragment, corrupted_fragment)``.
 MUTATIONS: list[tuple[str, str, str]] = [
     (
-        "current is not clamped after snapping to the step",
-        "{{ [[snapped, num_min] | max, num_max] | min | round(2) }}",
-        "{{ [snapped, num_min] | max | round(2) }}",
+        "the ceiling is not lowered to a multiple of the step",
+        "{% set snapped = ((num_max_raw / cur_step) | round(0, 'floor')) * cur_step %}",
+        "{% set snapped = num_max_raw %}",
     ),
+    # The outer clamp in ``desired_current`` is now belt-and-braces: since the
+    # ceiling itself is snapped down to a multiple of the step, rounding up can
+    # no longer overshoot it. It is kept as a cheap guard, but a mutation of it
+    # would survive by construction, so the mutation above targets the snapping
+    # of the ceiling instead - that is what actually enforces the bound now.
     (
         "entity attributes may widen the configured range",
         'num_min: "{{ [lim_min, ent_min] | max }}"',
@@ -62,8 +69,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "command throttling is bypassed",
-        '"{{ want_write and (gap_elapsed or not switch_on) }}"',
-        '"{{ want_write }}"',
+        '  gap_elapsed: "{{ current_age | float(0) >= command_gap | float(60) }}"',
+        '  gap_elapsed: "{{ true }}"',
     ),
     (
         "the window no longer spans midnight",
@@ -96,11 +103,6 @@ MUTATIONS: list[tuple[str, str, str]] = [
         "{{ states(e_soh) | float(100) }}",
     ),
     (
-        "a manually started session is cut off at the end of the window",
-        "or ((not in_window) and stop_at_window_end and session_owned)",
-        "or ((not in_window) and stop_at_window_end)",
-    ),
-    (
         "the time reserve is not subtracted from the budget",
         "{% set sec = (sp - n).total_seconds() - (reserve_minutes | float(0)) * 60 %}",
         "{% set sec = (sp - n).total_seconds() %}",
@@ -124,8 +126,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "the plan is stretched across the whole day outside the window",
-        "{{ 0.0834 }}\n    {% endif %}",
-        "{{ 24 }}\n    {% endif %}",
+        "{% elif emergency %}\n      {{ 0.0834 }}",
+        "{% elif emergency %}\n      {{ 24 }}",
     ),
     (
         "an unreadable charger status is taken for a plugged-in cable",
@@ -134,13 +136,88 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a cumulative energy meter is mistaken for a session meter",
-        "and states(e_energy) | float(0) <= energy_target | float(0) * 3 }}",
-        "}}",
+        "       and has_value(e_energy) and is_number(states(e_energy))\n"
+        "       and energy_plausible }}",
+        "       and has_value(e_energy) and is_number(states(e_energy)) }}",
     ),
     (
         "the emergency top-up stops dead on the threshold",
         "{{ soc < emergency_soc | float(0) + emergency_hysteresis | float(10) }}",
         "{{ soc < emergency_soc | float(0) }}",
+    ),
+    # ---- second review round ----
+    (
+        "swapped current bounds raise the ceiling instead of lowering the floor",
+        '  lim_max: "{{ in_max_current | float(28) }}"\n'
+        '  lim_min: "{{ [in_min_current | float(6), lim_max] | min }}"',
+        '  lim_min: "{{ in_min_current | float(6) }}"\n'
+        '  lim_max: "{{ [in_max_current | float(28), in_min_current | float(6)] | max }}"',
+    ),
+    (
+        "a session meter is rejected whenever it overshoots a small target",
+        "and states(e_energy) | float(0) <= energy_sane_max | float(100) }}",
+        "and states(e_energy) | float(0) <= energy_target | float(0) * 3 }}",
+    ),
+    (
+        "finishing off after the window hammers the daytime tariff",
+        "{% elif emergency %}\n      {{ 0.0834 }}\n    {% else %}\n      {{ 8 }}",
+        "{% elif emergency %}\n      {{ 0.0834 }}\n    {% else %}\n      {{ 0.0834 }}",
+    ),
+    (
+        "the watchdog is disabled whenever no power sensor is configured",
+        "{{ watchdog_minutes | float(0) > 0 and switch_on and plugged_in\n"
+        "       and (e_power == '' or has_value(e_power))",
+        "{{ watchdog_minutes | float(0) > 0 and switch_on and plugged_in\n"
+        "       and e_power != '' and has_value(e_power)",
+    ),
+    (
+        "a charger that never switches on is commanded on every tick",
+        '  needs_turn_on: "{{ not switch_on and switch_gap_elapsed }}"',
+        '  needs_turn_on: "{{ not switch_on }}"',
+    ),
+    (
+        "a hand-started session has its current overridden",
+        "{{ want_write and not foreign_session and (gap_elapsed or not switch_on) }}",
+        "{{ want_write and (gap_elapsed or not switch_on) }}",
+    ),
+    (
+        "a hand-started session is switched off at the end of the window",
+        "and (charger_fault or not foreign_session)",
+        "and true",
+    ),
+    # ---- the actions block, reachable since run_actions() exists ----
+    (
+        "the charger is switched on before the current is set",
+        "          # 3. включение\n"
+        "          - if:\n"
+        "              - condition: template\n"
+        '                value_template: "{{ needs_turn_on }}"\n'
+        "            then:\n"
+        "              - action: switch.turn_on",
+        "          # 3. включение\n"
+        "          - if:\n"
+        "              - condition: template\n"
+        '                value_template: "{{ true }}"\n'
+        "            then:\n"
+        "              - action: switch.turn_on",
+    ),
+    (
+        "the charger mode is never forced to manual",
+        '                value_template: "{{ needs_mode_write }}"',
+        '                value_template: "{{ false }}"',
+    ),
+    (
+        "a blocking pause creeps back in front of the setpoint write",
+        "            then:\n              - action: number.set_value\n"
+        "                continue_on_error: true\n                target:\n"
+        '                  entity_id: "{{ e_current }}"\n                data:\n'
+        '                  value: "{{ desired_current }}"',
+        "            then:\n              - delay:\n"
+        '                  seconds: "{{ command_gap | int(60) }}"\n'
+        "              - action: number.set_value\n"
+        "                continue_on_error: true\n                target:\n"
+        '                  entity_id: "{{ e_current }}"\n                data:\n'
+        '                  value: "{{ desired_current }}"',
     ),
     (
         "an empty weekday list disables the automation for good",

@@ -3,7 +3,18 @@
 from __future__ import annotations
 
 import pytest
-from conftest import LINK, PROBLEM, SESSION, SOC, STATUS, TRACKER, charging_since
+from conftest import (
+    LINK,
+    NUMBER,
+    PROBLEM,
+    SESSION,
+    SOC,
+    STATUS,
+    TRACKER,
+    build_world,
+    charging_since,
+    setpoint,
+)
 from ha_sim import State, moment
 
 
@@ -144,16 +155,67 @@ def test_our_own_session_is_cut_off_at_the_end_of_the_window(evaluate):
     assert ctx["must_stop"] is True
 
 
-def test_safety_stops_ignore_the_session_flag(evaluate):
-    """A departing car is cut off whoever started the session."""
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {TRACKER: "not_home"},
+        {SOC: 100},
+        {STATUS: "charged"},
+        {STATUS: "available"},
+    ],
+)
+def test_a_hand_started_session_is_left_alone(evaluate, overrides):
+    """Charging switched on by hand is none of the automation's business.
+
+    Someone who flipped the switch themselves chose the current they wanted and
+    knows why the car is plugged in; overriding either would be rude and, at
+    the end of the window, actively unwanted.
+    """
+    now = moment(3, 0)
+    world = dict(overrides)
+    world[SESSION] = "off"
+    world["switch.charger"] = charging_since(now)
+    ctx = evaluate(now, inputs={"session_flag": SESSION}, **world)
+    assert ctx["foreign_session"] is True
+    assert ctx["must_stop"] is False
+    assert ctx["needs_write"] is False
+
+
+def test_a_charger_fault_stops_even_a_hand_started_session(evaluate):
+    """The one exception: a fault is a safety matter, not a courtesy one."""
     now = moment(3, 0)
     ctx = evaluate(
         now,
         inputs={"session_flag": SESSION},
-        **{SESSION: "off", TRACKER: "not_home", "switch.charger": charging_since(now)},
+        **{SESSION: "off", STATUS: "fault", "switch.charger": charging_since(now)},
     )
+    assert ctx["foreign_session"] is True
     assert ctx["must_stop"] is True
-    assert ctx["stop_reason"] == "car_not_home"
+    assert ctx["stop_reason"] == "fault"
+
+
+def test_the_setpoint_of_a_hand_started_session_is_never_rewritten(evaluate):
+    """The whole point: the manually chosen current survives the night."""
+    now = moment(23, 30)
+    world = build_world(now, **{SESSION: "off", SOC: 40})
+    world[NUMBER] = setpoint(10, now)
+    world["switch.charger"] = charging_since(now, 180)
+    ctx = evaluate(now, inputs={"session_flag": SESSION}, world=world)
+    assert ctx["want_write"] is True, "the plan does disagree with 10 A"
+    assert ctx["needs_write"] is False, "but we must not act on that"
+
+
+def test_a_cable_plugged_in_early_is_not_a_foreign_session(evaluate):
+    """Plugging in during the day and leaving the charger off is the normal way
+    to queue a car for the night. That must start on schedule as usual."""
+    ctx = evaluate(
+        moment(23, 30),
+        inputs={"session_flag": SESSION},
+        **{SESSION: "off", SOC: 40, STATUS: "plugged_in"},
+    )
+    assert ctx["foreign_session"] is False
+    assert ctx["should_charge"] is True
+    assert ctx["needs_write"] is True
 
 
 def test_emergency_charging_ignores_the_window(evaluate):

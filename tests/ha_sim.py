@@ -304,6 +304,86 @@ class Blueprint:
     def trigger_ids(self) -> list[str]:
         return [t["id"] for t in self.triggers if "id" in t]
 
+    def run_actions(
+        self,
+        *,
+        world: dict[str, State],
+        now: dt.datetime,
+        inputs: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Walk the ``actions:`` block and return the calls it would make.
+
+        The variables block is the brain of the blueprint and is covered
+        exhaustively elsewhere; this exists to check the part that actually
+        talks to the charger: which service is called, in what order, with what
+        payload, and where the delays sit. Hook inputs render as
+        ``{"hook": <name>}`` so tests can assert that a notification fired
+        without caring what the user put in it.
+        """
+        helpers = _build_helpers(world, now)
+        context = self.evaluate(world=world, now=now, inputs=inputs)
+        calls: list[dict[str, Any]] = []
+
+        def truthy(value: Any) -> bool:
+            return value not in (False, None, "", "False", "false", 0)
+
+        def check(conditions: Any) -> bool:
+            for condition in conditions or []:
+                if "value_template" not in condition:
+                    raise NotImplementedError(f"unsupported condition: {condition}")
+                if not truthy(_render(condition["value_template"], helpers, context)):
+                    return False
+            return True
+
+        def walk(steps: Any) -> None:
+            if steps is None:
+                return
+            if isinstance(steps, InputRef):
+                calls.append({"hook": steps.name})
+                return
+            for step in steps:
+                if isinstance(step, InputRef):
+                    calls.append({"hook": step.name})
+                elif "choose" in step:
+                    for option in step["choose"] or []:
+                        if check(option.get("conditions")):
+                            walk(option.get("sequence"))
+                            break
+                    else:
+                        walk(step.get("default"))
+                elif "if" in step:
+                    walk(step["then"] if check(step["if"]) else step.get("else"))
+                elif "sequence" in step:
+                    walk(step["sequence"])
+                elif "delay" in step:
+                    delay = step["delay"]
+                    seconds = (
+                        delay.get("seconds", 0) if isinstance(delay, dict) else delay
+                    )
+                    calls.append(
+                        {"delay": _render(seconds, helpers, context)}
+                    )
+                elif "action" in step:
+                    calls.append(
+                        {
+                            "action": step["action"],
+                            "entity_id": _render(
+                                (step.get("target") or {}).get("entity_id"),
+                                helpers,
+                                context,
+                            ),
+                            "data": {
+                                key: _render(value, helpers, context)
+                                for key, value in (step.get("data") or {}).items()
+                            },
+                        }
+                    )
+                else:
+                    raise NotImplementedError(f"unsupported step: {sorted(step)}")
+
+        walk(self.document.get("actions"))
+        return calls
+
     def fire_trigger(
         self,
         trigger_id: str,

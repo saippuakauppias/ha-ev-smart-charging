@@ -77,20 +77,36 @@ def test_less_time_left_means_more_current(evaluate):
 
 @pytest.mark.parametrize("hour", [9, 12, 17, 21])
 def test_outside_the_window_the_budget_does_not_span_the_whole_day(evaluate, hour):
-    """The next window end can be almost 24 hours away.
-
-    Planning against that horizon would stretch an emergency top-up — the only
-    thing that charges outside the window — down to the minimum current.
-    """
+    """The next window end can be almost 24 hours away, and planning against
+    that horizon would collapse the current to the minimum."""
     ctx = evaluate(moment(hour, 0))
     assert ctx["in_window"] is False
-    assert ctx["hours_left"] < 1
+    assert ctx["hours_left"] <= 8
 
 
 def test_an_emergency_outside_the_window_charges_flat_out(evaluate):
+    """An emergency top-up exists precisely to be quick."""
     ctx = evaluate(moment(12, 0), inputs={"emergency_soc": 20}, **{SOC: 10})
     assert ctx["emergency"] is True
+    assert ctx["hours_left"] < 1
     assert ctx["desired_current"] == 28
+
+
+@pytest.mark.parametrize("soc,ceiling", [(31, 22), (50, 16), (99, 7)])
+def test_finishing_off_after_the_window_is_gentle(evaluate, soc, ceiling):
+    """The other reason to charge outside the window is "the window ended but
+    the target was missed". There is no hurry there, and hammering the daytime
+    tariff at maximum current is the opposite of what this blueprint is for.
+    """
+    now = moment(12, 0)
+    ctx = evaluate(
+        now,
+        inputs={"emergency_soc": 20, "stop_at_window_end": False},
+        **{SOC: soc, "switch.charger": charging_since(now)},
+    )
+    assert ctx["emergency"] is False
+    assert ctx["should_charge"] is True
+    assert ctx["desired_current"] <= ceiling
 
 
 # ------------------------------------------------------------------ weekdays
