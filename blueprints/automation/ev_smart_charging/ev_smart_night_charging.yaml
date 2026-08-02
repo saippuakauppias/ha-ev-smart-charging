@@ -49,7 +49,7 @@ blueprint:
     предыдущего изменения. Многие станции плохо переносят частые команды.
 
 
-    Версия 1.2.0
+    Версия 1.2.1
 
   domain: automation
   source_url: https://raw.githubusercontent.com/saippuakauppias/ha-ev-smart-charging/refs/heads/main/blueprints/automation/ev_smart_charging/ev_smart_night_charging.yaml
@@ -441,7 +441,7 @@ blueprint:
           description: >
             Запасной план на случай, когда процент заряда недоступен: заряжать,
             пока счётчик станции не отдаст столько киловатт-часов.
-            Ориентир: нужные вам проценты × ёмкость / 100, плюс примерно 12 % на потери.
+            Ориентир: нужные вам проценты × ёмкость / 100, плюс примерно 14 % на потери (при КПД 88 %).
           default: 0
           selector:
             number:
@@ -1144,19 +1144,32 @@ variables:
 
   # Пустые элементы отбрасываем: иначе очищенное поле превратилось бы в [''],
   # и проверка «статус не в списке» стала бы истинной для любого статуса.
-  list_unplugged: "{{ s_unplugged.split(',') | map('trim') | reject('eq', '') | list }}"
-  list_charging: "{{ s_charging.split(',') | map('trim') | reject('eq', '') | list }}"
-  list_done: "{{ s_done.split(',') | map('trim') | reject('eq', '') | list }}"
-  list_fault: "{{ s_fault.split(',') | map('trim') | reject('eq', '') | list }}"
+  #
+  # `| string` обязательно. Поле объявлено текстовым, но YAML приводит `0`
+  # к числу, а у числа нет `.split` — рендер падал целиком, и автоматизация
+  # не делала за ночь ничего: ни зарядки, ни остановки, ни хука ошибки.
+  # Числовые статусы (0 — свободна, 1 — подключена, 2 — заряжает) обычны
+  # у обёрток над OCPP и у части Tuya-станций.
+  #
+  # Регистр приводим к нижнему здесь и у самого статуса: станции сплошь
+  # отдают CHARGING и SUSPENDED_EV, а переписывают их в поле как придётся.
+  list_unplugged: "{{ (s_unplugged | string).lower().split(',') | map('trim') | reject('eq', '') | list }}"
+  list_charging: "{{ (s_charging | string).lower().split(',') | map('trim') | reject('eq', '') | list }}"
+  list_done: "{{ (s_done | string).lower().split(',') | map('trim') | reject('eq', '') | list }}"
+  list_fault: "{{ (s_fault | string).lower().split(',') | map('trim') | reject('eq', '') | list }}"
 
   # Статус станции не читается. Это не повод считать кабель подключённым:
   # начинать сессию вслепую нельзя. Но и рвать уже идущую зарядку из-за
   # пропавшего сенсора не нужно — этим занимается status_known ниже.
-  status_known: "{{ charger_status not in ['unknown', 'unavailable', 'none', ''] }}"
-  plugged_in: "{{ charger_status not in list_unplugged if status_known else switch_on }}"
-  charger_finished: "{{ charger_status in list_done }}"
+  # Для сравнений со списками — нормализованный регистр; в журнал и в diag
+  # по-прежнему идёт charger_status как есть, чтобы было видно, что реально
+  # отдаёт станция.
+  status_norm: "{{ charger_status | lower }}"
+  status_known: "{{ status_norm not in ['unknown', 'unavailable', 'none', ''] }}"
+  plugged_in: "{{ status_norm not in list_unplugged if status_known else switch_on }}"
+  charger_finished: "{{ status_norm in list_done }}"
   charger_fault: >-
-    {{ charger_status in list_fault
+    {{ status_norm in list_fault
        or (e_problem != '' and is_state(e_problem, 'on')) }}
 
   # ============ возраст последних команд ============
@@ -1209,7 +1222,7 @@ variables:
     {% elif e_power != '' and has_value(e_power) %}
       {{ states(e_power) | float(0) > no_power_threshold | float(200) }}
     {% else %}
-      {{ charger_status in list_charging }}
+      {{ status_norm in list_charging }}
     {% endif %}
   # Начать сессию можно только при известном местоположении, продолжить —
   # если трекер замолчал ИЛИ если ток реально идёт: и «GPS потерялся», и
@@ -1248,14 +1261,24 @@ variables:
     {% if e_power != '' and has_value(e_power) %}
       {{ states(e_power) | float(0) > no_power_threshold | float(200) }}
     {% else %}
-      {{ charger_status in list_charging }}
+      {{ status_norm in list_charging }}
     {% endif %}
   soc_age_min: >-
     {% set o = states[e_battery] if e_battery != '' else none %}
     {{ 0 if o is none else ((now() - o.last_changed).total_seconds() / 60) | round(1) }}
+  # Сырой процент до валидации — нужен, чтобы отличить «замёрз» от «доехал».
+  soc_raw: "{{ states(e_battery) | float(-1) if soc_present else -1 }}"
+  # Достигнутая цель — законная причина перестать меняться, и объявлять данные
+  # негодными здесь нельзя. Раньше объявлялись: машина доходила до цели,
+  # станция ещё отдавала мощность (балансировка ячеек, доводка), процент
+  # честно стоял на месте — и через soc_freeze_minutes срабатывал детектор.
+  # Дальше по цепочке soc_valid=False гасил target_reached, а без него
+  # must_stop не наступал: зарядка не выключалась, план сваливался
+  # на резервный ток, а в хук ошибки уходило ложное car_data_frozen.
+  soc_at_target: "{{ soc_raw | float(-1) >= target_soc | float(100) }}"
   soc_frozen: >-
     {{ soc_freeze_minutes | float(0) > 0 and soc_present
-       and switch_on and charging_now
+       and switch_on and charging_now and not soc_at_target
        and soc_age_min | float(0) >= soc_freeze_minutes | float(90) }}
 
   soc_valid: "{{ soc_present and soc_fresh and not soc_frozen }}"
@@ -1268,9 +1291,24 @@ variables:
     {% else %}none{% endif %}
 
   # ============ полезная ёмкость с поправкой на здоровье батареи ============
-  soh_pct: >-
+  # Часть интеграций отдаёт здоровье батареи долей (0.98), а не процентами.
+  # Раньше такое значение просто зажималось нижней границей и превращалось
+  # в 50 % — полезная ёмкость падала вдвое, ток занижался вдвое, и машина
+  # молча не дозаряжалась. Долю распознаём по величине и переводим в проценты;
+  # всё остальное вне диапазона считаем ошибкой сенсора и берём 100,
+  # а не подтягиваем к границе — зажим здесь маскировал бы неверные данные.
+  soh_raw: >-
     {% if e_soh != '' and has_value(e_soh) and is_number(states(e_soh)) %}
-      {{ [[states(e_soh) | float(100), 50] | max, 130] | min }}
+      {{ states(e_soh) | float(-1) }}
+    {% else %}
+      {{ -1 }}
+    {% endif %}
+  soh_scaled: >-
+    {{ (soh_raw | float(-1) * 100) if 0 < soh_raw | float(-1) < 2
+       else soh_raw | float(-1) }}
+  soh_pct: >-
+    {% if 50 <= soh_scaled | float(-1) <= 130 %}
+      {{ soh_scaled | float(100) }}
     {% else %}
       {{ 100 }}
     {% endif %}
@@ -1313,6 +1351,23 @@ variables:
     {% else %}
       {{ soc < emergency_soc | float(0) }}
     {% endif %}
+  # Началась ли текущая сессия внутри окна.
+  #
+  # Это нужно, чтобы отличить «доработать начатое» от аварийной дозарядки,
+  # которая уже выполнила свою задачу. Блюпринт не помнит, почему сессия
+  # начиналась, но возраст выключателя отвечает на вопрос честно: если
+  # выключатель включён дольше, чем прошло с конца окна, значит зарядка
+  # шла ещё внутри окна.
+  #
+  # Вне окна и до его сегодняшнего конца (то есть ночью до start_time)
+  # считаем, что сессия начата не в окне: продлевать там нечего.
+  window_ended_ago: >-
+    {% set sp = today_at(stop_time_str) %}
+    {% set n = now() %}
+    {{ (n - sp).total_seconds() | round(0) if n >= sp else -1 }}
+  session_started_in_window: >-
+    {{ window_ended_ago | float(-1) >= 0
+       and switch_age | float(0) > window_ended_ago | float(0) }}
 
   # ============ холодная погода ============
   # Возраст показания проверяется, только если пользователь этого попросил:
@@ -1409,12 +1464,25 @@ variables:
     {% else %}{{ nominal_voltage | float(230) }}{% endif %}
 
   # ============ расчёт ============
+  # round(4) здесь не косметика, а защита от отказа всей автоматизации.
+  #
+  # Home Assistant превращает результат шаблона в число, только если строка
+  # похожа на число по его собственной мерке (^[+-]?(?!0\d)\d*(?:\.\d*)?$) —
+  # научная нотация под неё не подходит и остаётся СТРОКОЙ. А Jinja печатает
+  # научную нотацию сама, стоит остатку стать меньше 1e-4: машина, отдающая
+  # процент с четырьмя знаками (Tesla, BMW, Renault), при цели 100 % и заряде
+  # 99.9999 давала needed_kwh = '4.886363636525847e-05'. Дальше по цепочке
+  # строка умножалась на 1000, деление на hours_left роняло рендер целиком,
+  # и автоматизация не делала за ночь ничего — ни зарядки, ни остановки,
+  # ни хука ошибки. Округление до четырёх знаков (0.1 Вт·ч) удерживает запись
+  # в обычном десятичном виде; на расчёт тока такая точность не влияет.
   needed_kwh: >-
     {% if plan_source == 'soc' %}
       {% set delta = [target_soc | float(100) - soc, 0] | max %}
-      {{ (delta / 100 * (effective_capacity | float(50))) / ([efficiency | float(88), 1] | max / 100) }}
+      {{ ((delta / 100 * (effective_capacity | float(50)))
+          / ([efficiency | float(88), 1] | max / 100)) | round(4) }}
     {% elif plan_source == 'energy' %}
-      {{ [energy_target | float(0) - energy_done, 0] | max }}
+      {{ ([energy_target | float(0) - energy_done, 0] | max) | round(4) }}
     {% else %}
       {{ 0 }}
     {% endif %}
@@ -1423,7 +1491,12 @@ variables:
     {% if emergency or cold_mode %}
       {{ num_max }}
     {% elif plan_source == 'none' %}
-      {{ fallback_current | float(10) }}
+      {# Данные пропали. Резервный ток — это ответ для НАЧАЛА сессии;
+         посреди идущей зарядки опускаться ниже уже работающего тока нельзя.
+         Раньше опускались: при отставании от плана уставка 22 А сваливалась
+         на резервные 10 А ровно тогда, когда не хватало и 22, а на 10 А
+         процент растёт втрое медленнее — то есть отставание только росло. #}
+      {{ [fallback_current | float(10), current_now if switch_on else 0] | max }}
     {% else %}
       {% set watts = needed_kwh * 1000 / hours_left %}
       {{ (watts / ([voltage * phases_n, 1] | max)) | round(3) }}
@@ -1442,9 +1515,16 @@ variables:
     {{ [[snapped, num_min] | max, num_max] | min | round(2) }}
 
   # Зона нечувствительности гасит косметические правки, но не должна мешать
-  # выйти на границу диапазона: если план требует именно потолка (мы отстаём
-  # от графика) или именно минимума, уставка пишется независимо от неё.
-  at_boundary: "{{ desired_current >= num_max or desired_current <= num_min }}"
+  # выйти на потолок: если план требует именно максимума, значит мы отстаём
+  # от графика, и лишний ампер здесь решает, доедет машина до цели или нет.
+  #
+  # Нижняя граница в этот список не входит намеренно. Под утро, когда машина
+  # почти заряжена, план колеблется около минимума (6 → 7 → 6 → 7 А), и раньше
+  # каждое такое колебание проламывало зону нечувствительности: в симуляции
+  # это давало одиннадцать записей за ночь вместо восьми, причём девять из них
+  # меняли направление. Ток при этом уже минимальный — разница в один ампер
+  # ни на что не влияет, а команды станции изнашивают её вхолостую.
+  at_boundary: "{{ desired_current >= num_max }}"
   # Уставку станции сравниваем с допуском в половину шага: станция может
   # рапортовать 27.9 там, где мы просили 28, и точное сравнение заставляло бы
   # переписывать уставку на каждом пересчёте в обход зоны нечувствительности.
@@ -1465,6 +1545,15 @@ variables:
   # зарядка считается своей.
   session_owned: "{{ e_session == '' or is_state(e_session, 'on') }}"
   foreign_session: "{{ switch_on and not session_owned }}"
+  # Флаг сессии, оставшийся поднятым при выключенной станции. Сбросить его
+  # в ветке остановки недостаточно: та достижима только при must_stop, а он
+  # требует switch_on. Если зарядку выключили вручную, или станция погасла
+  # сама по неисправности, или Home Assistant перезапустился между двумя
+  # командами, флаг оставался поднятым навсегда — и следующая ручная зарядка
+  # считалась нашей, то есть автоматизация перебивала выставленный человеком
+  # ток. Ровно то, против чего флаг и заведён.
+  session_flag_stuck: >-
+    {{ e_session != '' and not switch_on and is_state(e_session, 'on') }}
 
   # Зона нечувствительности применяется НЕсимметрично, и это принципиально.
   #
@@ -1478,16 +1567,24 @@ variables:
   # доехать до цели, а перезапись ради долей ампера изнашивает станцию.
   # Здесь зона работает в полную силу — именно ради этого случая она и вводилась.
   current_rising: "{{ desired_current > current_now }}"
-  # Строгое «больше»: при нулевой зоне нечувствительности параметр должен
-  # означать «писать при любом отличии», а не «писать всегда, даже когда
-  # уставка уже верная».
   # Перед стартом сессии зона нечувствительности не применяется: уходить
   # в ночь с прошлогодней уставкой нельзя. Но и переписывать значение, которое
   # уже верное, тоже не нужно — иначе включение, стоящее в очереди следом,
   # не наступит никогда.
+  #
+  # Допуск даже на подъёме не нулевой, а в половину шага станции. Нулевой
+  # допуск означает «переписывать при любом расхождении», а расхождение бывает
+  # неустранимым: станция с внутренним шагом 0.5 А на команду 28 А рапортует
+  # 27.5 и будет рапортовать так всегда. С нулевым допуском мы писали бы ей
+  # одно и то же значение каждые command_gap секунд до утра — ровно тот износ,
+  # против которого и заведён троттлинг. Полшага заведомо меньше одного шага,
+  # поэтому законное повышение на шаг вверх проходит по-прежнему.
+  rise_tolerance: "{{ cur_step | float(1) / 2 }}"
   want_write: >-
     {{ (desired_current - current_now) | abs
-         > (0 if (current_rising or not switch_on) else deadband | float(2))
+         > (rise_tolerance | float(0.5)
+            if (current_rising or not switch_on)
+            else [deadband | float(2), rise_tolerance | float(0.5)] | max)
        or (at_boundary and setpoint_differs) }}
   # Переключение режима станции. Пустое значение режима не пишем: команда
   # с пустой опцией всё равно отвергается станцией, а continue_on_error
@@ -1499,8 +1596,14 @@ variables:
   # Записываем, только если пауза между командами уже выдержана. Первая команда
   # сессии (станция ещё выключена) идёт без ожидания — иначе старт зарядки
   # откладывался бы на весь интервал троттлинга.
+  # `status_known` обязателен: идущую зарядку из-за пропавшего сенсора рвать
+  # не нужно (см. plugged_in), но и регулировать её вслепую — тоже. Раньше
+  # регулировали: сенсор статуса уходил в unavailable, а автоматизация
+  # продолжала писать в станцию, связь с которой потеряна, и в журнале это
+  # выглядело как штатная работа. Теперь уставка замирает до восстановления.
   needs_write: >-
-    {{ want_write and not foreign_session and (gap_elapsed or not switch_on) }}
+    {{ want_write and not foreign_session and status_known
+       and (gap_elapsed or not switch_on) }}
   # Команда включения. Троттлится по возрасту самого выключателя: если станция
   # приняла команду, но не включилась (ровно тот случай, ради которого нужен
   # watchdog), повтор пойдёт не раньше чем через паузу, а хук старта не будет
@@ -1529,32 +1632,30 @@ variables:
     {{ current_age | float(9e9) < [command_gap | float(60) * 3, 300] | max }}
 
   # ============ решение ============
+  # switch_present стоит первым: без выключателя вся ветка бессмысленна.
+  # Раньше его проверял только вердикт, и при переименованной сущности
+  # (или незагрузившейся интеграции станции) автоматизация продолжала считать
+  # план, писать ток и звать хук старта — команды уходили в никуда, а ошибку
+  # глотал continue_on_error. В журнале это выглядело как штатная работа.
+  # «Доработать начатое» продлевает только ту сессию, что шла внутри окна.
+  # Раньше условие было шире, и аварийная дозарядка днём превращалась
+  # в полноценную дневную сессию: гистерезис гасил emergency на пороге+10,
+  # но дизъюнкт (switch_on and not stop_at_window_end) тут же подхватывал
+  # зарядку и вёл её до 100 % по дневному тарифу. Описание параметра обещает
+  # обратное — аварийная дозарядка это исключение для СТАРТА, а не разрешение
+  # доливать весь день.
+  finish_started_session: >-
+    {{ switch_on and not stop_at_window_end and session_started_in_window }}
   should_charge: >-
-    {{ charger_online
-       and (in_window or emergency or (switch_on and not stop_at_window_end))
+    {{ switch_present
+       and charger_online
+       and (in_window or emergency or finish_started_session)
        and plugged_in
        and not target_reached
        and not charger_finished
        and not charger_fault
        and (allow_continue if switch_on else allow_start) }}
 
-
-  # Причина остановки. Порядок ветвей тот же, что у verdict, иначе одна
-  # и та же остановка называлась бы в журнале и в трассировке по-разному:
-  # уехавшая машина неизбежно уносит с собой кабель, и без общего порядка
-  # `unplugged` затирал бы настоящую первопричину.
-  # Вне остановки — пусто, а не 'other': пока гасить нечего, любое значение
-  # здесь читается как причина и вводит в заблуждение.
-  stop_reason: >-
-    {% if charger_fault %}fault
-    {% elif target_reached %}target_reached
-    {% elif charger_finished %}charger_reports_charged
-    {% elif car_left %}car_not_home
-    {% elif not plugged_in %}unplugged
-    {% elif not charger_online %}charger_offline
-    {% elif not status_known %}status_unknown
-    {% elif not in_window %}window_end
-    {% else %}none{% endif %}
 
   # Осмысленно только в момент завершения сессии (хук on_finish_actions):
   # там «цель не достигнута» — итог ночи. В любой другой момент флаг истинен
@@ -1574,7 +1675,33 @@ variables:
          or car_left
          or (status_known and not plugged_in)
          or ((not in_window) and stop_at_window_end)
+         or ((not in_window) and not finish_started_session)
        ) }}
+
+  # Причина остановки. Порядок ветвей тот же, что у verdict, иначе одна
+  # и та же остановка называлась бы в журнале и в трассировке по-разному:
+  # уехавшая машина неизбежно уносит с собой кабель, и без общего порядка
+  # `unplugged` затирал бы настоящую первопричину.
+  #
+  # Объявлено ПОСЛЕ must_stop, потому что первым делом на него и смотрит:
+  # вне остановки — 'none'. Без этой проверки ветки ниже истинны и во
+  # множестве ситуаций, где зарядка спокойно продолжается (чужая сессия при
+  # достигнутой цели давала 'target_reached', нечитаемый статус при идущей
+  # зарядке — 'status_unknown'), а любое значение здесь читается как причина.
+  stop_reason: >-
+    {% if not must_stop %}none
+    {% elif charger_fault %}fault
+    {% elif target_reached %}target_reached
+    {% elif charger_finished %}charger_reports_charged
+    {% elif car_left %}car_not_home
+    {% elif not plugged_in %}unplugged
+    {% elif not status_known %}status_unknown
+    {% elif not in_window %}window_end
+    {% else %}none{% endif %}
+    {#- Ветки charger_offline здесь нет намеренно: must_stop требует
+        charger_online, то есть офлайн-станцию мы и не гасим — её нечем гасить.
+        Пока причина считалась вне остановки, ветка выглядела осмысленной;
+        теперь она была бы недостижимым кодом, вводящим в заблуждение. -#}
 
   # ============ контроль исправности ============
   # «Включено, но ток не идёт». Верхняя граница по времени нужна, чтобы
@@ -1596,10 +1723,19 @@ variables:
 
   # О проблемах с данными сообщаем только во время своей сессии,
   # чтобы не слать уведомления круглосуточно, пока машина просто спит.
+  #
+  # В отличие от watchdog выше, окна «сообщить один раз» здесь нет намеренно.
+  # Такое окно требует знать, как давно проблема длится, а блюпринт не хранит
+  # состояние между прогонами: возраст самих данных для этого не годится
+  # (сенсор мог замереть ещё до начала сессии, и окно оказалось бы закрыто
+  # с первого же пересчёта — тогда о реальной проблеме не сообщили бы вовсе).
+  # Поэтому пока данные негодны, хук ошибки вызывается на каждом пересчёте;
+  # гасить повторы, если они мешают, следует в самом действии уведомления.
   data_alarm: "{{ switch_on and soc_problem != 'none' }}"
 
   alarm_reason: >-
-    {% if charger_fault %}charger_fault
+    {% if not switch_present %}switch_entity_missing
+    {% elif charger_fault %}charger_fault
     {% elif no_power_alarm and car_says_charging == 'no' %}car_refused_charge
     {% elif no_power_alarm and car_says_charging == 'yes' %}charger_reports_no_power_but_car_charging
     {% elif no_power_alarm %}no_power_while_on
@@ -1623,6 +1759,7 @@ variables:
     {% elif not charger_online %}станция офлайн
     {% elif charger_fault %}неисправность станции
     {% elif not status_known and not switch_on %}статус станции нечитаем, старт вслепую запрещён
+    {% elif not status_known %}статус станции нечитаем, ток не трогаем до восстановления связи
     {% elif car_left %}машина не дома
     {% elif not plugged_in %}кабель не подключён
     {% elif target_reached %}цель достигнута
@@ -1638,6 +1775,10 @@ variables:
     {% elif want_write and not gap_elapsed %}ток надо менять, но идёт пауза ({{ (command_gap | float(60) - current_age | float(0)) | round(0) }} с)
     {% elif data_alarm %}ток в норме, но данные о заряде ненадёжны ({{ soc_problem }})
     {% elif not want_write %}ток в норме, отличие меньше зоны нечувствительности
+    {# Последняя ветка недостижима: перебор 720 сочетаний часа, статуса,
+       заряда, уставки и состояния выключателя даёт 33 разных вердикта,
+       и ни одного «без изменений». Оставлена намеренно — пустой вердикт
+       в журнале хуже лишней строчки кода, а ветви выше со временем меняются. #}
     {% else %}без изменений{% endif %}
 
   # ============ слепок для трассировки ============
@@ -1870,28 +2011,49 @@ actions:
 
           - sequence: !input on_finish_actions
 
-          # Сброс уставки — последним действием: выключение уже отправлено,
-          # и даже если этот шаг не доживёт до конца (режим restart), зарядка
-          # всё равно остановлена. Пауза короткая и фиксированная — она нужна
-          # лишь для того, чтобы станция успела переварить предыдущую команду.
-          - if:
-              - condition: template
-                value_template: "{{ reset_current_on_stop }}"
-            then:
-              - delay:
-                  seconds: 5
-              - action: number.set_value
-                continue_on_error: true
-                target:
-                  entity_id: "{{ e_current }}"
-                data:
-                  value: "{{ num_min }}"
+          # Сброса уставки здесь нет намеренно. Он требует паузы (станция
+          # не переварит две команды подряд), а блокирующая пауза в режиме
+          # restart не доживает до конца: выключение, отправленное строкой
+          # выше, само меняет статус станции — а это наш же триггер, который
+          # обрывает последовательность вместе с невыполненной командой.
+          # Поэтому сброс вынесен в ветку 3 и выполняется следующим прогоном,
+          # так же как разнесены «уставка → включение» на старте.
 
     # ================= ВЕТКА 3: ничего не делаем =================
     # Самый частый исход и самый трудный для разбора: раньше пересчёт, не
     # приведший к команде, не оставлял следа вообще, и «почему ночью ничего
     # не произошло» приходилось выводить из косвенных признаков.
     default:
+      # Уборка за прошлой сессией. Обе команды идут отдельным прогоном
+      # и потому переживают обрыв, в отличие от прежней паузы в ветке 2.
+
+      # Флаг сессии мог остаться поднятым, если зарядку выключили не мы.
+      - if:
+          - condition: template
+            value_template: "{{ session_flag_stuck }}"
+        then:
+          - action: input_boolean.turn_off
+            continue_on_error: true
+            target:
+              entity_id: "{{ e_session }}"
+
+      # Сброс уставки к минимуму после остановки: следующая ручная зарядка
+      # не должна стартовать с ночным током. Ждём паузу между командами,
+      # чтобы станция успела переварить выключение.
+      - if:
+          - condition: template
+            value_template: >-
+              {{ reset_current_on_stop and switch_present and not switch_on
+                 and switch_gap_elapsed and gap_elapsed
+                 and current_now > num_min }}
+        then:
+          - action: number.set_value
+            continue_on_error: true
+            target:
+              entity_id: "{{ e_current }}"
+            data:
+              value: "{{ num_min }}"
+
       - if:
           - condition: template
             value_template: "{{ debug_logging }}"

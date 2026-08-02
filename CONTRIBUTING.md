@@ -64,6 +64,16 @@ yamllint -c .yamllint.yaml blueprints/ .github/ .yamllint.yaml
 pip install homeassistant && python tests/validate_with_home_assistant.py
 ```
 
+Если правили `tools/trace_report.py` — он намеренно держит совместимость
+с Python 3.9 и не требует ни одного стороннего пакета. Люди запускают его
+системным интерпретатором, чтобы приложить вывод к баг-репорту, и просить их
+сначала поставить окружение — значит не получить отчёт вовсе. Основной `ruff`
+настроен на 3.11 и такую несовместимость не поймает, поэтому проверяйте отдельно:
+
+```bash
+ruff check --target-version py39 tools/ && /usr/bin/python3 -m py_compile tools/trace_report.py
+```
+
 ## Изменения, ломающие совместимость
 
 Переименование или удаление входа сбрасывает настройку у всех, кто уже

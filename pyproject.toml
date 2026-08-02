@@ -9,7 +9,7 @@ description = "Home Assistant blueprint for adaptive overnight EV charging"
 requires-python = ">=3.11"
 
 [tool.pytest.ini_options]
-minversion = "7.0"
+minversion = "8.0"
 testpaths = ["tests"]
 pythonpath = ["tests"]
 addopts = "-ra --strict-markers --strict-config"
@@ -23,4 +23,15 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "UP", "B", "SIM"]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "RUF", "C4", "RET", "PTH"]
+ignore = [
+    # Проект целиком на русском: кириллические буквы в строках, комментариях
+    # и докстрингах — это норма, а не подозрительные омоглифы.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # noqa: UP017 нужны для совместимости tools/ с Python 3.9. При основном
+    # target-version = py311 правило срабатывает, поэтому подавления не лишние —
+    # RUF100 считает их таковыми, потому что смотрит на один прогон.
+    "RUF100",
+]

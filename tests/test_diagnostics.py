@@ -31,17 +31,14 @@ from ha_sim import State, moment
 
 
 @pytest.fixture
-def run(blueprint, base_inputs):
-    def _run(now=None, *, inputs=None, world=None, **world_overrides):
-        now = now or moment(23, 0)
-        merged = dict(base_inputs)
-        merged["debug_logging"] = True
+def logged_run(run):
+    """``run`` with the logbook switched on - this file is about what gets
+    written down, and nothing is written without it."""
+
+    def _run(now=None, *, inputs=None, **kwargs):
+        merged = {"debug_logging": True}
         merged.update(inputs or {})
-        return blueprint.run_actions(
-            world=world if world is not None else build_world(now, **world_overrides),
-            now=now,
-            inputs=merged,
-        )
+        return run(now, inputs=merged, **kwargs)
 
     return _run
 
@@ -221,18 +218,41 @@ def test_the_verdict_and_the_stop_reason_never_disagree(evaluate):
 
 
 @pytest.mark.parametrize(
-    "overrides,expected",
+    "overrides,verdict_fragment",
     [
-        ({LINK: "off"}, "charger_offline"),
-        ({STATUS: State("unknown")}, "status_unknown"),
+        ({LINK: "off"}, "офлайн"),
+        ({STATUS: State("unknown")}, "статус"),
     ],
 )
-def test_stops_that_used_to_report_nothing_now_name_themselves(
-    evaluate, overrides, expected
+def test_troubles_that_do_not_stop_the_session_name_no_stop_reason(
+    evaluate, overrides, verdict_fragment
 ):
-    """Both used to fall through to a catch-all that named no cause at all."""
+    """Neither of these actually stops anything, and ``stop_reason`` must say so.
+
+    An offline charger cannot be commanded at all - ``must_stop`` requires the
+    link - and an unreadable status deliberately lets a running session carry
+    on. Naming a cause here made the trace read as though the session had been
+    cut for that reason. The verdict is where the trouble gets described.
+    """
     now = moment(3, 0)
     ctx = evaluate(now, **{SWITCH: charging_since(now), **overrides})
+    assert ctx["must_stop"] is False
+    assert ctx["stop_reason"] == "none"
+    assert verdict_fragment in ctx["verdict"]
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({SOC: 100}, "target_reached"),
+        ({STATUS: "charged"}, "charger_reports_charged"),
+        ({STATUS: "fault"}, "fault"),
+    ],
+)
+def test_a_real_stop_names_its_cause(evaluate, overrides, expected):
+    now = moment(3, 0)
+    ctx = evaluate(now, **{SWITCH: charging_since(now), **overrides})
+    assert ctx["must_stop"] is True
     assert ctx["stop_reason"] == expected
 
 
@@ -266,12 +286,12 @@ def test_command_flags_are_silent_when_the_branch_cannot_run(evaluate):
     assert commands["выставить_режим"] is False
 
 
-def test_the_stop_entry_carries_what_the_stop_was_judged_on(run):
+def test_the_stop_entry_carries_what_the_stop_was_judged_on(logged_run):
     """The most important line of the night was also the least informative:
     it named the reason but not the evidence, so a tracker that lied while
     17.6 A were flowing looked exactly like a car that had driven away."""
     now = moment(3, 0)
-    written = messages(run(now, **{SOC: 100, SWITCH: charging_since(now, 200)}))
+    written = messages(logged_run(now, **{SOC: 100, SWITCH: charging_since(now, 200)}))
     assert written
     entry = written[0]
     assert "трекер=" in entry, "what the tracker claimed"
@@ -378,10 +398,10 @@ def test_the_snapshot_needs_no_optional_entity_at_all(evaluate):
 # ------------------------------------------------------------------ logbook
 
 
-def test_a_run_without_commands_still_leaves_a_trace(run):
+def test_a_run_without_commands_still_leaves_a_trace(logged_run):
     """Previously the most common outcome recorded nothing at all, and
     "why did nothing happen last night" had no answer anywhere."""
-    calls = run(moment(12, 0))
+    calls = logged_run(moment(12, 0))
     written = messages(calls)
     assert written, "an idle recalculation must still be explained"
     assert "вне окна" in written[0]
@@ -396,24 +416,24 @@ def test_a_run_without_commands_still_leaves_a_trace(run):
         ({STATUS: State("unknown")}, "нечитаем"),
     ],
 )
-def test_each_silent_outcome_names_itself_in_the_logbook(run, overrides, expected):
-    written = messages(run(moment(23, 0), **overrides))
+def test_each_silent_outcome_names_itself_in_the_logbook(logged_run, overrides, expected):
+    written = messages(logged_run(moment(23, 0), **overrides))
     assert written and expected in written[0]
 
 
-def test_the_idle_entry_is_silent_when_logging_is_off(run):
-    assert messages(run(moment(12, 0), inputs={"debug_logging": False})) == []
+def test_the_idle_entry_is_silent_when_logging_is_off(logged_run):
+    assert messages(logged_run(moment(12, 0), inputs={"debug_logging": False})) == []
 
 
-def test_the_charging_entry_leads_with_the_verdict(run, evaluate):
+def test_the_charging_entry_leads_with_the_verdict(logged_run, evaluate):
     now = moment(23, 0)
-    written = messages(run(now))
+    written = messages(logged_run(now))
     assert written and written[0].startswith(evaluate(now)["verdict"])
 
 
-def test_the_stop_entry_states_the_verdict_and_the_reason(run):
+def test_the_stop_entry_states_the_verdict_and_the_reason(logged_run):
     now = moment(3, 0)
-    written = messages(run(now, **{SOC: 100, SWITCH: charging_since(now)}))
+    written = messages(logged_run(now, **{SOC: 100, SWITCH: charging_since(now)}))
     assert written
     assert "цель достигнута" in written[0]
     assert "target_reached" in written[0]
@@ -430,7 +450,21 @@ def test_the_stop_entry_states_the_verdict_and_the_reason(run):
         {LINK: "off"},
     ],
 )
-def test_every_logbook_entry_renders(run, hour, overrides):
-    for message in messages(run(moment(hour, 0), **overrides)):
+def test_every_logbook_entry_renders(logged_run, hour, overrides):
+    for message in messages(logged_run(moment(hour, 0), **overrides)):
         assert "{{" not in message
         assert message.strip()
+
+
+def test_a_session_ended_with_an_unreadable_status_says_so(evaluate):
+    """The window closes while the status sensor is dark.
+
+    The session does stop here - the window is over - and the reason has to name
+    the unreadable status rather than falling through to something that reads
+    like an ordinary end of window. Without it, a night that ended because the
+    charger integration died looks identical to one that simply finished.
+    """
+    now = moment(9, 0)
+    ctx = evaluate(now, **{STATUS: State("unavailable"), SWITCH: charging_since(now)})
+    assert ctx["must_stop"] is True
+    assert ctx["stop_reason"] == "status_unknown"

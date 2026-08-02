@@ -19,9 +19,9 @@ jobs:
     name: YAML lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
 
@@ -39,9 +39,9 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
@@ -57,9 +57,9 @@ jobs:
     name: Mutation testing
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -77,17 +77,105 @@ jobs:
     name: Python lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
 
-      - name: Install ruff
-        run: pip install ruff
+      - name: Install development dependencies
+        run: pip install -r requirements-dev.txt
 
       - name: Lint the test harness and tools
         run: ruff check tests/ tools/
+
+      # tools/ has to keep running on the interpreter people already have.
+      # The main lint targets 3.11, so on its own it would happily pass code
+      # that 3.9 cannot even parse.
+      - name: Lint tools/ against the oldest supported Python
+        run: ruff check --target-version py39 tools/
+
+  tools-python39:
+    name: trace_report.py on Python 3.9
+    runs-on: ubuntu-latest
+    # The script is what users run to produce a bug report, so it must work on
+    # a stock system interpreter with nothing installed. macOS still ships 3.9.
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.9"
+
+      - name: Byte-compile without any dependencies
+        run: python -m py_compile tools/trace_report.py
+
+      - name: Run it end to end under an ASCII locale
+        env:
+          LC_ALL: C
+          LANG: C
+          PYTHONUTF8: "0"
+          PYTHONCOERCECLOCALE: "0"
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          folder = pathlib.Path("_ci_traces")
+          folder.mkdir(exist_ok=True)
+          (folder / "a.json").write_text(json.dumps({
+              "trace": {"trace": {"action/0": [{"changed_variables": {"verdict": "старт"}}]},
+                        "timestamp": {"start": "2026-08-02T00:05:00+00:00"}},
+              "logbookEntries": [{"message": "запускаем зарядку", "when": 1785628800.0}],
+          }, ensure_ascii=False), encoding="utf-8")
+          PY
+          python tools/trace_report.py _ci_traces --vars
+          python tools/trace_report.py _ci_traces --json > /dev/null
+
+  packaging:
+    name: HACS metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The version lives in the blueprint description and nowhere else, so it
+      # can silently disagree with the changelog. A tag disagreeing with either
+      # is worse: HACS serves tags, so users would install something whose
+      # notes describe a different release.
+      - name: Version agrees between the blueprint and the changelog
+        run: |
+          python - <<'PY'
+          import pathlib, re, sys
+          bp = pathlib.Path("blueprints/automation/ev_smart_charging"
+                            "/ev_smart_night_charging.yaml").read_text(encoding="utf-8")
+          found = re.search(r"Версия\s+(\d+\.\d+\.\d+)", bp)
+          if not found:
+              sys.exit("no version found in the blueprint description")
+          version = found.group(1)
+          changelog = pathlib.Path("CHANGELOG.md").read_text(encoding="utf-8")
+          if f"## [{version}]" not in changelog:
+              sys.exit(f"blueprint says {version}, CHANGELOG has no such section")
+          tag = "${{ github.ref_type == 'tag' && github.ref_name || '' }}"
+          if tag and tag.lstrip("v") != version:
+              sys.exit(f"tag {tag} does not match blueprint version {version}")
+          print(f"version {version} agrees across the blueprint and CHANGELOG")
+          PY
+
+      # hacs.json is never exercised by the test suite, but a typo in it breaks
+      # installation for every HACS user and only surfaces as a bug report.
+      - name: Validate hacs.json and the blueprint layout
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+          meta = json.loads(pathlib.Path("hacs.json").read_text(encoding="utf-8"))
+          if not meta.get("name"):
+              sys.exit("hacs.json: name is required")
+          # HACS installs blueprints by directory layout: blueprints/<domain>/<slug>/
+          found = list(pathlib.Path("blueprints").glob("*/*/*.yaml"))
+          if not found:
+              sys.exit("no blueprint found under blueprints/<domain>/<slug>/")
+          print("hacs.json OK;", ", ".join(str(p) for p in found))
+          PY
 
   home-assistant-schema:
     name: Home Assistant schema (informational)
@@ -96,14 +184,23 @@ jobs:
     # here is a signal to investigate rather than a reason to block a merge.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
       - name: Install Home Assistant
         run: pip install homeassistant
 
+      # The script exits 77 when it decides to skip; to GitHub that is just a
+      # failure, so translate it back into a pass.
       - name: Validate the blueprint against the real schema
-        run: python tests/validate_with_home_assistant.py
+        run: |
+          status=0
+          python tests/validate_with_home_assistant.py || status=$?
+          if [ "$status" -eq 77 ]; then
+            echo "::notice::schema check skipped"
+            exit 0
+          fi
+          exit "$status"

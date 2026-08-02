@@ -56,22 +56,56 @@ def load(folder: Path) -> list[dict[str, Any]]:
     runs = []
     for path in sorted(folder.glob("*.json")):
         try:
-            raw = json.loads(path.read_text())
-        except (json.JSONDecodeError, UnicodeDecodeError):
+            # Читаем байтами: трассировки — UTF-8 с кириллицей, а read_text()
+            # взял бы кодировку из локали. Под LC_ALL=C (ssh без проброса
+            # локали, cron, docker) это давало UnicodeDecodeError на каждом
+            # файле, и except ниже молча съедал все трассировки разом.
+            raw = json.loads(path.read_bytes())
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as exc:
+            # Про пропуск говорим вслух: молчание здесь неотличимо от
+            # «файлов нет», а это самый частый повод открыть issue.
+            print(f"пропущен {path.name}: {exc}", file=sys.stderr)
+            continue
+        # Верхний уровень может быть чем угодно: в папке загрузок лежит
+        # посторонний JSON, в том числе списки и строки.
+        if not isinstance(raw, dict):
             continue
         trace = raw.get("trace")
         if not isinstance(trace, dict) or "trace" not in trace:
             continue
-        runs.append({"file": path.name, "trace": trace, "logbook": raw.get("logbookEntries", [])})
+        entries = raw.get("logbookEntries")
+        runs.append({
+            "file": path.name,
+            "trace": trace,
+            "logbook": entries if isinstance(entries, list) else [],
+        })
     return runs
 
 
 def when(run: dict[str, Any], tz: dt.timezone) -> dt.datetime | None:
     stamp = run["trace"].get("timestamp", {})
     start = stamp.get("start") if isinstance(stamp, dict) else None
-    if not start:
+    if not isinstance(start, str) or not start:
         return None
-    return dt.datetime.fromisoformat(start).astimezone(tz)
+    # Суффикс «Z» fromisoformat понимает только с 3.11, а скрипт рассчитан
+    # на системный Python (на macOS это 3.9).
+    try:
+        parsed = dt.datetime.fromisoformat(start.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    # Время без зоны — это UTC: так его пишет Home Assistant. Без явной
+    # подстановки astimezone() взял бы зону машины, и один и тот же файл
+    # читался бы по-разному в Москве и в Нью-Йорке.
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)  # noqa: UP017
+    return parsed.astimezone(tz)
+
+
+def stamp_of(run: dict[str, Any], tz: dt.timezone) -> str:
+    """Время прогона для печати. Трассировка без отметки времени — не повод
+    ронять весь отчёт: её остальное содержимое всё ещё полезно."""
+    moment = when(run, tz)
+    return f"{moment:%m-%d %H:%M:%S}" if moment else "??-?? ??:??:??"
 
 
 def variables(run: dict[str, Any]) -> dict[str, Any]:
@@ -92,7 +126,7 @@ def variables(run: dict[str, Any]) -> dict[str, Any]:
 
 def commands(run: dict[str, Any]) -> list[str]:
     found = []
-    for path, steps in run["trace"].get("trace", {}).items():
+    for steps in run["trace"].get("trace", {}).values():
         if not isinstance(steps, list):
             continue
         for step in steps:
@@ -106,17 +140,24 @@ def commands(run: dict[str, Any]) -> list[str]:
                 name = f"{service}.{action}"
                 if name in COMMANDS:
                     found.append(name)
-            elif "/choose/" in path and isinstance(result.get("choice"), int):
-                continue
     return found
 
 
 def logbook(runs: list[dict[str, Any]], tz: dt.timezone) -> list[tuple[dt.datetime, str]]:
-    rows = set()
+    # Одна и та же запись журнала попадает в несколько скачанных файлов,
+    # поэтому дедуплицируем. Ключ включает имя файла-источника не целиком:
+    # повтор внутри одного прогона — это реальное повторное срабатывание,
+    # и терять его нельзя, а вот копию из соседнего файла — нужно.
+    rows: set[tuple[dt.datetime, str]] = set()
     for run in runs:
+        seen_here: dict[tuple[dt.datetime, str], int] = {}
         for entry in run["logbook"]:
+            if not isinstance(entry, dict):
+                continue
             message, stamp = entry.get("message"), entry.get("when")
-            if not message or not stamp:
+            if not message or not isinstance(message, str):
+                continue
+            if not isinstance(stamp, (int, float)):
                 continue
             # «triggered by ...» — служебная запись самой автоматизации,
             # она дублирует триггер и только засоряет ленту.
@@ -124,23 +165,64 @@ def logbook(runs: list[dict[str, Any]], tz: dt.timezone) -> list[tuple[dt.dateti
                 continue
             # timezone.utc, а не UTC-алиас (3.11+): скрипт запускают системным
             # Python, а он на macOS до сих пор 3.9.
-            moment = dt.datetime.fromtimestamp(stamp, dt.timezone.utc).astimezone(tz)  # noqa: UP017
-            rows.add((moment, " ".join(message.split())))
+            try:
+                moment = dt.datetime.fromtimestamp(stamp, dt.timezone.utc).astimezone(tz)  # noqa: UP017
+            except (OverflowError, OSError, ValueError):
+                continue
+            key = (moment, " ".join(message.split()))
+            # В пределах одного файла одинаковые пары «время + текст» — разные
+            # события (mode: restart легко даёт пачку за одну секунду), поэтому
+            # сдвигаем повтор на микросекунду, чтобы он пережил дедупликацию
+            # между файлами и при этом встал в ленту сразу за оригиналом.
+            seen_here[key] = seen_here.get(key, 0) + 1
+            shift = seen_here[key] - 1
+            rows.add((moment + dt.timedelta(microseconds=shift), key[1]))
     return sorted(rows)
 
 
+def offset_hours(value: str) -> float:
+    """Часовой пояс как смещение от UTC. Опечатка вроде «33» вместо «3»
+    должна давать понятный отказ, а не стек вызовов из недр datetime."""
+    try:
+        hours = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"нужно число, а не {value!r}") from None
+    if not -24 < hours < 24:
+        raise argparse.ArgumentTypeError(f"смещение {hours} вне диапазона (-24, 24)")
+    return hours
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description=__doc__,
+        # Без этого argparse схлопывает докстринг в один абзац и примеры
+        # команд слипаются в нечитаемую кашу.
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("folder", type=Path, help="папка со скачанными трассировками")
-    parser.add_argument("--tz", type=float, default=3.0, help="часовой пояс, часов от UTC")
+    parser.add_argument("--tz", type=offset_hours, default=3.0,
+                        help="часовой пояс, часов от UTC (по умолчанию 3)")
     parser.add_argument("--vars", action="store_true", help="таблица переменных по прогонам")
     parser.add_argument("--json", action="store_true", help="машинночитаемый вывод")
     args = parser.parse_args()
 
+    # Отчёт почти целиком на кириллице, а под ASCII-локалью print() ломался бы
+    # на первой же строке (или деградировал в \uXXXX).
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
+
     tz = dt.timezone(dt.timedelta(hours=args.tz))
+    if not args.folder.is_dir():
+        print(f"{args.folder} — не папка.", file=sys.stderr)
+        return 1
     runs = load(args.folder)
     if not runs:
-        print(f"В {args.folder} не найдено файлов трассировок.", file=sys.stderr)
+        print(
+            f"В {args.folder} не найдено файлов трассировок "
+            f"(поиск идёт только в самой папке, без вложенных).",
+            file=sys.stderr,
+        )
         return 1
     runs.sort(key=lambda r: when(r, tz) or dt.datetime.min.replace(tzinfo=tz))
 
@@ -148,7 +230,7 @@ def main() -> int:
         json.dump(
             [
                 {
-                    "time": (when(r, tz) or "").__str__(),
+                    "time": str(moment) if (moment := when(r, tz)) else None,
                     "trigger": r["trace"].get("trigger"),
                     "commands": commands(r),
                     "variables": variables(r),
@@ -174,7 +256,7 @@ def main() -> int:
         sent = commands(run)
         if sent:
             quiet = False
-            print(f"{when(run, tz):%m-%d %H:%M:%S}  {', '.join(sent)}")
+            print(f"{stamp_of(run, tz)}  {', '.join(sent)}")
     if quiet:
         print("(команд не было)")
 
@@ -182,7 +264,7 @@ def main() -> int:
         print("\n=== ПЕРЕМЕННЫЕ ===")
         for run in runs:
             values = variables(run)
-            print(f"\n{when(run, tz):%m-%d %H:%M:%S}  триггер: {run['trace'].get('trigger')}")
+            print(f"\n{stamp_of(run, tz)}  триггер: {run['trace'].get('trigger')}")
             for key in INTERESTING:
                 if key in values:
                     print(f"    {key} = {values[key]!r}")

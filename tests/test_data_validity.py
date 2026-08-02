@@ -9,7 +9,17 @@ from __future__ import annotations
 import datetime as dt
 
 import pytest
-from conftest import ENERGY, PING, POWER, SOC, SOH, STATUS, charging_since
+from conftest import (
+    ENERGY,
+    NUMBER,
+    PING,
+    POWER,
+    SOC,
+    SOH,
+    STATUS,
+    charging_since,
+    setpoint,
+)
 from ha_sim import State, moment
 
 
@@ -173,6 +183,36 @@ def test_charging_continues_even_when_every_check_fails(evaluate):
     )
     assert ctx["should_charge"] is True
     assert ctx["must_stop"] is False
+    assert ctx["plan_source"] == "none"
+
+
+def test_losing_the_data_mid_session_does_not_cut_the_current(evaluate):
+    """The reserve current answers "what do we start at", not "what do we drop
+    to". Halving a current that was already behind schedule makes the shortfall
+    worse, and the percentage then climbs slower still - the same shape of
+    defect that cost the first real night its last seventeen points.
+    """
+    now = moment(1, 0)
+    ctx = evaluate(
+        now,
+        inputs={"fallback_current": 10},
+        **{SOC: State("unavailable"),
+           "switch.charger": charging_since(now),
+           NUMBER: setpoint(22, now)},
+    )
+    assert ctx["desired_current"] == 22, "the running current is held, not cut"
+
+
+def test_the_reserve_current_still_applies_before_a_session_starts(evaluate):
+    """With the charger off there is nothing to hold on to."""
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        inputs={"fallback_current": 10},
+        **{SOC: State("unavailable"),
+           "switch.charger": State("off", last_changed=moment(18, 0)),
+           NUMBER: setpoint(22, now)},
+    )
     assert ctx["desired_current"] == 10
 
 
@@ -293,8 +333,21 @@ def test_health_sensor_scales_the_usable_capacity(evaluate):
     assert ctx["effective_capacity"] == pytest.approx(37.84)
 
 
-@pytest.mark.parametrize("reading,expected", [(9999, 130), (3, 50), (-5, 50)])
-def test_absurd_health_readings_are_clamped(evaluate, reading, expected):
+@pytest.mark.parametrize("reading", [9999, 3, -5, 0, 45, 131])
+def test_absurd_health_readings_are_ignored_rather_than_clamped(evaluate, reading):
+    """Clamping hid the mistake: a sensor reading 3 became 50 %, and the pack
+    silently shrank by half. An implausible reading says the sensor is wrong,
+    not that the battery is - so the declared capacity stands.
+    """
+    ctx = evaluate(moment(23, 0), inputs={"soh_sensor": SOH}, **{SOH: reading})
+    assert ctx["soh_pct"] == 100
+    assert ctx["effective_capacity"] == 43.0
+
+
+@pytest.mark.parametrize("reading,expected", [(0.98, 98.0), (1.0, 100.0), (0.8, 80.0)])
+def test_health_reported_as_a_fraction_is_read_as_a_percentage(evaluate, reading, expected):
+    """Some integrations publish 0.98 rather than 98. That used to clamp to the
+    50 % floor and halve every current for the night."""
     ctx = evaluate(moment(23, 0), inputs={"soh_sensor": SOH}, **{SOH: reading})
     assert ctx["soh_pct"] == expected
 
@@ -304,3 +357,149 @@ def test_unavailable_health_sensor_leaves_capacity_untouched(evaluate):
         moment(23, 0), inputs={"soh_sensor": SOH}, **{SOH: State("unavailable")}
     )
     assert ctx["soh_pct"] == 100
+
+
+# ------------------------------------------------- charger status vocabulary
+
+
+def test_a_numeric_status_vocabulary_does_not_break_the_render(evaluate):
+    """YAML turns a bare ``0`` into an int, and ints have no ``.split``.
+
+    The whole ``variables:`` block used to fail to render, which in Home
+    Assistant means the automation does nothing at all for the night - no
+    charging, no stopping, not even the error hook. Numeric statuses are
+    ordinary on OCPP wrappers and on some Tuya chargers.
+    """
+    ctx = evaluate(
+        moment(1, 0),
+        inputs={"status_unplugged": 0, "status_charging": 2},
+        **{STATUS: "2", "switch.charger": charging_since(moment(1, 0))},
+    )
+    assert ctx["plugged_in"] is True
+    assert ctx["charging_now"] is True
+
+
+def test_a_status_typed_in_the_wrong_case_still_matches(evaluate):
+    """People retype the charger's statuses into the field however they please."""
+    ctx = evaluate(
+        moment(1, 0),
+        inputs={"status_unplugged": "AVAILABLE"},
+        **{STATUS: "available", "switch.charger": charging_since(moment(1, 0))},
+    )
+    assert ctx["plugged_in"] is False
+
+
+def test_a_charger_shouting_its_status_still_matches(evaluate):
+    """The other direction, and the one that actually happens: chargers report
+    ``CHARGING`` and ``SUSPENDED_EV`` in caps while the field holds lower case.
+
+    Both sides have to be normalised - folding only the field would leave this
+    case broken, and the charger's own spelling is the one we cannot control.
+    """
+    now = moment(1, 0)
+    ctx = evaluate(
+        now,
+        inputs={"status_charging": "charging", "status_unplugged": "available"},
+        **{STATUS: "CHARGING", "switch.charger": charging_since(now)},
+    )
+    assert ctx["charging_now"] is True
+    assert ctx["plugged_in"] is True
+
+
+def test_a_finished_status_in_caps_is_recognised(evaluate):
+    now = moment(1, 0)
+    ctx = evaluate(
+        now,
+        inputs={"status_done": "charged"},
+        **{STATUS: "CHARGED", "switch.charger": charging_since(now)},
+    )
+    assert ctx["charger_finished"] is True
+    assert ctx["must_stop"] is True
+
+
+def test_the_status_is_logged_exactly_as_the_charger_reports_it(evaluate):
+    """Normalising is for comparisons only - the log must show the real thing."""
+    ctx = evaluate(moment(1, 0), **{STATUS: "CHARGING"})
+    assert ctx["charger_status"] == "CHARGING"
+
+
+# --------------------------------------------- a percentage sitting on target
+
+
+def test_a_percentage_resting_at_the_target_is_not_frozen_data(evaluate):
+    """Reaching the target is a perfectly good reason to stop changing.
+
+    The charger keeps drawing power afterwards - cell balancing, top-off - so
+    the freeze detector used to fire, and the damage was not the false alarm
+    but what followed: an invalid percentage cannot satisfy ``target_reached``,
+    so ``must_stop`` never came and the session ran on to the end of the window.
+    """
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        inputs={"target_soc": 100, "soc_freeze_minutes": 90},
+        **{SOC: State(100, last_changed=moment(1, 20)),
+           POWER: 3800,
+           "switch.charger": charging_since(now, minutes=180)},
+    )
+    assert ctx["soc_frozen"] is False
+    assert ctx["target_reached"] is True
+    assert ctx["must_stop"] is True
+
+
+def test_a_percentage_stuck_below_the_target_is_still_frozen_data(evaluate):
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        inputs={"target_soc": 100, "soc_freeze_minutes": 90},
+        **{SOC: State(60, last_changed=moment(1, 20)),
+           POWER: 3800,
+           "switch.charger": charging_since(now, minutes=180)},
+    )
+    assert ctx["soc_frozen"] is True
+    assert ctx["target_reached"] is False
+
+
+def test_a_lower_target_also_counts_as_reached(evaluate):
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        inputs={"target_soc": 80, "soc_freeze_minutes": 90},
+        **{SOC: State(80, last_changed=moment(1, 20)),
+           POWER: 3800,
+           "switch.charger": charging_since(now, minutes=180)},
+    )
+    assert ctx["soc_frozen"] is False
+    assert ctx["must_stop"] is True
+
+
+# ------------------------------------------------- values Home Assistant can use
+
+
+@pytest.mark.parametrize("soc", [99.9999, 99.99999, 99.999999, 99.9, 50.0, 0.0])
+def test_the_budget_never_renders_in_scientific_notation(evaluate, soc):
+    """Home Assistant hands a template result back as a number only when the
+    text looks numeric by its own rule, and ``4.9e-05`` does not.
+
+    Left alone it stays a *string*, the next multiplication builds a
+    twenty-thousand-character string instead of a number, and the division
+    after it raises - taking the whole ``variables:`` block with it. In Home
+    Assistant that means the automation does nothing for the rest of the night:
+    no charging, no stopping, not even the error hook. A car reporting four
+    decimal places at a 100 % target is all it takes.
+    """
+    ctx = evaluate(moment(3, 0), **{SOC: State(soc)})
+    assert isinstance(ctx["needed_kwh"], (int, float)), (
+        f"needed_kwh came back as {ctx['needed_kwh']!r}"
+    )
+    assert isinstance(ctx["desired_current"], (int, float))
+
+
+def test_an_energy_plan_within_a_whisker_of_its_target_also_stays_numeric(evaluate):
+    ctx = evaluate(
+        moment(3, 0),
+        inputs={"session_energy_sensor": ENERGY, "session_energy_target": 20},
+        **{SOC: State("unavailable"), ENERGY: 19.999999},
+    )
+    assert ctx["plan_source"] == "energy"
+    assert isinstance(ctx["needed_kwh"], (int, float))

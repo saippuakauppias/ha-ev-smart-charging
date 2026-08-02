@@ -122,8 +122,12 @@ def test_end_of_window_stops_by_default(evaluate):
 
 def test_end_of_window_can_be_allowed_to_overrun(evaluate):
     now = moment(9, 0)
+    # Running since 04:00, i.e. from inside the window: this is a session to be
+    # finished, not one that started outside it.
     ctx = evaluate(
-        now, inputs={"stop_at_window_end": False}, **{"switch.charger": charging_since(now)}
+        now,
+        inputs={"stop_at_window_end": False},
+        **{"switch.charger": charging_since(now, minutes=5 * 60)},
     )
     assert ctx["should_charge"] is True
     assert ctx["must_stop"] is False

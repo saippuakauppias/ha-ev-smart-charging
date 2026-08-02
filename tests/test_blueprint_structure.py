@@ -226,3 +226,68 @@ def test_variables_are_defined_before_they_are_used(blueprint):
                         f"{name} references {candidate}, which is defined later"
                     )
         seen.add(name)
+
+
+#: Every scalar default, pinned. The test suite mostly passes its own values in,
+#: so a changed default would otherwise slip through unnoticed - and defaults
+#: are what almost every installation actually runs on. Changing one here should
+#: be a deliberate edit, made together with the README table.
+EXPECTED_DEFAULTS = {
+    "battery_capacity": 43,
+    "car_stale_max": 1800,
+    "charger_mode_value": "immediate",
+    "cold_temp_max_age": 0,
+    "cold_threshold": -100,
+    "command_gap": 60,
+    "current_deadband": 2,
+    "current_step": 1,
+    "debug_logging": False,
+    "efficiency": 88,
+    "emergency_hysteresis": 10,
+    "emergency_soc": 0,
+    "fallback_current": 10,
+    "home_zone": "zone.home",
+    "max_current": 28,
+    "min_current": 6,
+    "no_power_threshold": 200,
+    "nominal_voltage": 230,
+    "phases": "1",
+    "recalc_interval": "/30",
+    "require_home": True,
+    "reset_current_on_stop": False,
+    "session_energy_target": 0,
+    "soc_freeze_minutes": 90,
+    "start_time": "23:00:00",
+    "status_charging": "charging",
+    "status_done": "charged",
+    "status_fault": "fault",
+    "status_unplugged": "available, fault_unplugged",
+    "stop_at_window_end": True,
+    "stop_time": "07:00:00",
+    "target_soc": 100,
+    "time_reserve_minutes": 30,
+    "watchdog_minutes": 15,
+}
+
+
+def test_the_scalar_defaults_are_what_the_documentation_promises(blueprint):
+    actual = {
+        name: spec["default"]
+        for name, spec in blueprint.inputs.items()
+        if isinstance(spec, dict)
+        and "default" in spec
+        and not isinstance(spec["default"], list)
+    }
+    assert actual == EXPECTED_DEFAULTS
+
+
+def test_the_defaults_are_internally_consistent(blueprint):
+    """A default set that contradicts itself would ship broken to everyone who
+    never opens the advanced sections."""
+    d = EXPECTED_DEFAULTS
+    assert d["min_current"] < d["max_current"]
+    assert d["min_current"] <= d["fallback_current"] <= d["max_current"]
+    assert d["current_deadband"] < d["max_current"] - d["min_current"]
+    assert 0 < d["efficiency"] <= 100
+    assert 0 < d["target_soc"] <= 100
+    assert d["start_time"] != d["stop_time"]

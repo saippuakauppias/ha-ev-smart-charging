@@ -98,9 +98,15 @@ MUTATIONS: list[tuple[str, str, str]] = [
         "{% elif derived_voltage >= 175 %}derived",
     ),
     (
-        "battery health is not clamped to a sane range",
-        "{{ [[states(e_soh) | float(100), 50] | max, 130] | min }}",
-        "{{ states(e_soh) | float(100) }}",
+        "battery health is not checked against a sane range",
+        "    {% if 50 <= soh_scaled | float(-1) <= 130 %}",
+        "    {% if true %}",
+    ),
+    (
+        "battery health reported as a fraction is not rescaled",
+        "    {{ (soh_raw | float(-1) * 100) if 0 < soh_raw | float(-1) < 2\n"
+        "       else soh_raw | float(-1) }}",
+        "    {{ soh_raw | float(-1) }}",
     ),
     (
         "the time reserve is not subtracted from the budget",
@@ -120,9 +126,17 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "charging efficiency is ignored when sizing the budget",
-        "{{ (delta / 100 * (effective_capacity | float(50))) "
-        "/ ([efficiency | float(88), 1] | max / 100) }}",
-        "{{ (delta / 100 * (effective_capacity | float(50))) }}",
+        "      {{ ((delta / 100 * (effective_capacity | float(50)))\n"
+        "          / ([efficiency | float(88), 1] | max / 100)) | round(4) }}",
+        "      {{ (delta / 100 * (effective_capacity | float(50))) | round(4) }}",
+    ),
+    (
+        "the budget is left in scientific notation, which Home Assistant "
+        "hands back as a string",
+        "      {{ ((delta / 100 * (effective_capacity | float(50)))\n"
+        "          / ([efficiency | float(88), 1] | max / 100)) | round(4) }}",
+        "      {{ (delta / 100 * (effective_capacity | float(50)))\n"
+        "          / ([efficiency | float(88), 1] | max / 100) }}",
     ),
     (
         "the plan is stretched across the whole day outside the window",
@@ -131,8 +145,23 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "an unreadable charger status is taken for a plugged-in cable",
-        "{{ charger_status not in list_unplugged if status_known else switch_on }}",
-        "{{ charger_status not in list_unplugged if status_known else true }}",
+        "{{ status_norm not in list_unplugged if status_known else switch_on }}",
+        "{{ status_norm not in list_unplugged if status_known else true }}",
+    ),
+    (
+        "charger statuses are compared case-sensitively",
+        'status_norm: "{{ charger_status | lower }}"',
+        'status_norm: "{{ charger_status }}"',
+    ),
+    (
+        "a percentage sitting at the target counts as frozen data",
+        "and switch_on and charging_now and not soc_at_target",
+        "and switch_on and charging_now",
+    ),
+    (
+        "losing the data mid-session cuts the current to the reserve figure",
+        "{{ [fallback_current | float(10), current_now if switch_on else 0] | max }}",
+        "{{ fallback_current | float(10) }}",
     ),
     (
         "a cumulative energy meter is mistaken for a session meter",
@@ -177,8 +206,21 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a hand-started session has its current overridden",
-        "{{ want_write and not foreign_session and (gap_elapsed or not switch_on) }}",
-        "{{ want_write and (gap_elapsed or not switch_on) }}",
+        "    {{ want_write and not foreign_session and status_known\n"
+        "       and (gap_elapsed or not switch_on) }}",
+        "    {{ want_write and status_known and (gap_elapsed or not switch_on) }}",
+    ),
+    (
+        "the current is steered while the charger status is unreadable",
+        "    {{ want_write and not foreign_session and status_known\n"
+        "       and (gap_elapsed or not switch_on) }}",
+        "    {{ want_write and not foreign_session\n"
+        "       and (gap_elapsed or not switch_on) }}",
+    ),
+    (
+        "a stop reason is reported when nothing is being stopped",
+        "    {% if not must_stop %}none\n    {% elif charger_fault %}fault",
+        "    {% if charger_fault %}fault",
     ),
     (
         "a hand-started session is switched off at the end of the window",
@@ -251,13 +293,40 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "the deadband swallows a request to raise the current",
-        "         > (0 if (current_rising or not switch_on) else deadband | float(2))",
+        "         > (rise_tolerance | float(0.5)\n"
+        "            if (current_rising or not switch_on)\n"
+        "            else [deadband | float(2), rise_tolerance | float(0.5)] | max)",
         "         > deadband | float(2)",
+    ),
+    (
+        "a charger that quantises the setpoint is rewritten forever",
+        'rise_tolerance: "{{ cur_step | float(1) / 2 }}"',
+        'rise_tolerance: "{{ 0 }}"',
+    ),
+    (
+        "the boundary clause forces writes at the floor as well as the ceiling",
+        'at_boundary: "{{ desired_current >= num_max }}"',
+        'at_boundary: "{{ desired_current >= num_max or desired_current <= num_min }}"',
     ),
     (
         "the setpoint and the switch-on go out in the same run",
         "    {{ not switch_on and switch_gap_elapsed and not needs_write }}",
         "    {{ not switch_on and switch_gap_elapsed }}",
+    ),
+    (
+        "commands are sent to a switch that does not exist",
+        "    {{ switch_present\n       and charger_online",
+        "    {{ charger_online",
+    ),
+    (
+        "a session flag left raised by a manual stop is never cleared",
+        "    {{ e_session != '' and not switch_on and is_state(e_session, 'on') }}",
+        "    {{ false }}",
+    ),
+    (
+        "an emergency top-up runs on through the day once it has recovered",
+        "    {{ switch_on and not stop_at_window_end and session_started_in_window }}",
+        "    {{ switch_on and not stop_at_window_end }}",
     ),
     (
         "the start notification repeats on every retry",
@@ -272,8 +341,7 @@ MUTATIONS: list[tuple[str, str, str]] = [
         "    {% elif car_left %}машина не дома",
     ),
     (
-        "an offline charger and an unreadable status report no cause",
-        "    {% elif not charger_online %}charger_offline\n"
+        "an unreadable status reports no cause when it does stop the session",
         "    {% elif not status_known %}status_unknown\n",
         "",
     ),
@@ -298,8 +366,13 @@ def sandbox(tmp_path_factory) -> Path:
     shutil.copytree(
         REPO_ROOT,
         target,
+        # ``.direnv`` and ``_tmp`` are the expensive ones: a direnv environment
+        # runs to hundreds of megabytes and downloaded traces are not small
+        # either. Copying them made every mutation run drag and produced
+        # spurious cleanup warnings from paths pytest could not remove.
         ignore=shutil.ignore_patterns(
-            ".git", "__pycache__", ".pytest_cache", ".ruff_cache", "*.pyc"
+            ".git", "__pycache__", ".pytest_cache", ".ruff_cache", "*.pyc",
+            ".direnv", ".venv", "venv", "_tmp", "htmlcov", ".coverage",
         ),
     )
     return target
@@ -321,6 +394,25 @@ def _run_suite(sandbox: Path) -> int:
     )
     match = re.search(r"(\d+) failed", result.stdout)
     return int(match.group(1)) if match else 0
+
+
+@pytest.mark.parametrize(
+    "label,original,corrupted", MUTATIONS, ids=[m[0] for m in MUTATIONS]
+)
+def test_every_mutation_still_matches_the_blueprint(label, original, corrupted):
+    """A mutation whose fragment has drifted out of the blueprint applies to
+    nothing, and the run then "passes" while testing nothing at all. That has
+    happened more than once after refactoring, so the check runs with the fast
+    tests rather than only inside the ten-minute mutation job.
+
+    Matching exactly once also matters: ``str.replace(..., 1)`` would silently
+    corrupt the first of several occurrences, which is rarely the intended one.
+    """
+    source = BLUEPRINT_PATH.read_text(encoding="utf-8")
+    assert source.count(original) == 1, (
+        f"mutation {label!r} matches {source.count(original)} places - update it"
+    )
+    assert corrupted != original
 
 
 @pytest.mark.slow

@@ -1,0 +1,13 @@
+---
+blank_issues_enabled: false
+contact_links:
+  - name: 💡 Идея или доработка
+    url: https://github.com/saippuakauppias/ha-ev-smart-charging/discussions
+    about: >-
+      Предложения обсуждаем в Discussions. Часть уже обдуманных идей собрана
+      в IDEAS.md — загляните туда, возможно ваша там уже есть.
+  - name: 🔒 Проблема безопасности
+    url: https://github.com/saippuakauppias/ha-ev-smart-charging/security/advisories/new
+    about: >-
+      Дефекты, из-за которых станция может получить ток выше настроенного
+      максимума или не выключиться, сообщайте приватно, а не публичным issue.

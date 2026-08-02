@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 from dataclasses import dataclass, field
+from itertools import pairwise
 from typing import Any
 
 import pytest
@@ -268,11 +269,19 @@ def test_losing_the_car_connection_mid_night_keeps_charging(blueprint, night_inp
     assert log.final_soc > log.soc_trace[6] + 10
 
 
-def test_after_losing_the_connection_the_current_settles_on_the_fallback(
+def test_after_losing_the_connection_the_current_holds_steady(
     blueprint, night_inputs
 ):
+    """Losing the percentage mid-night must not cut the current that is already
+    flowing: the reserve figure is a starting point, not a ceiling to fall to.
+    What matters is that the setpoint stops moving and charging carries on.
+    """
     log = simulate_night(blueprint, night_inputs, start_soc=30, soc_dies_after=4)
-    assert log.setpoints[-1] == 10
+    tail = log.setpoints[5:]
+    assert len(set(tail)) == 1, f"the setpoint kept moving blind: {tail}"
+    assert tail[0] >= 10, "it must not drop below the reserve current"
+    # The only stop allowed here is the ordinary end of the window.
+    assert log.stop_reason in (None, "window_end")
 
 
 def test_a_short_window_pushes_the_current_up(blueprint, night_inputs):
@@ -404,10 +413,13 @@ def test_a_frozen_percentage_falls_back_without_stopping(blueprint, night_inputs
         events={4: {SOC: State("41.0", last_changed=moment(23, 0, day=31, month=7))}},
     )
     assert "car_data_frozen" in log.alarms
-    # Charging carries on; only the plan degrades to the reserve current.
+    # Charging carries on. The plan stops steering, but the current it was
+    # already delivering is held rather than cut back to the reserve figure.
     assert log.switch_commands.count("on") == 1
     assert log.stop_reason in (None, "window_end")
-    assert log.setpoints[-1] == 10  # the reserve current
+    tail = log.setpoints[6:]
+    assert len(set(tail)) == 1, f"the setpoint kept moving blind: {tail}"
+    assert tail[0] >= 10
 
 
 def test_a_dead_socket_raises_the_watchdog(blueprint, night_inputs):
@@ -451,3 +463,22 @@ def test_a_three_phase_night_reaches_the_target(blueprint, night_inputs):
     log = simulate_night(blueprint, inputs, phases=3)
     assert log.setpoints[0] < 10
     assert log.final_soc > 99
+
+
+def test_the_setpoint_does_not_oscillate_once_the_car_is_nearly_full(
+    blueprint, night_inputs
+):
+    """Towards morning the plan hovers around the minimum current.
+
+    The rule "at the edge of the range, write regardless of the deadband" was
+    meant for the ceiling, where an extra amp decides whether the target is
+    reached. Applied at the floor it let every 6 -> 7 -> 6 wobble through: the
+    charger took eleven commands over a night where one was enough, nine of
+    them reversing the previous one.
+    """
+    log = simulate_night(blueprint, night_inputs, start_soc=80, mains_voltage=220)
+    deltas = [b - a for a, b in pairwise(log.setpoints)]
+    reversals = sum(1 for a, b in pairwise(deltas) if a * b < 0)
+    assert reversals == 0, f"the setpoint oscillated: {log.setpoints}"
+    assert log.writes <= 4, f"{log.writes} writes for a nearly full battery"
+    assert log.final_soc >= 99.0

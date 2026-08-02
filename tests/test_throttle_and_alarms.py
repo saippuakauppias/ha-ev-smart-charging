@@ -13,6 +13,7 @@ from conftest import (
     POWER,
     SOC,
     STATUS,
+    SWITCH,
     charging_since,
     setpoint,
 )
@@ -400,3 +401,71 @@ def test_an_empty_mode_value_is_never_written(evaluate):
 def test_the_mode_is_written_when_it_genuinely_differs(evaluate):
     ctx = evaluate(moment(23, 0), **{MODE: "scheduled_charge"})
     assert ctx["needs_mode_write"] is True
+
+
+def test_a_charger_that_quantises_the_setpoint_is_not_rewritten_forever(evaluate):
+    """Some chargers snap the setpoint to their own grid and report it back.
+
+    Ask for 28 A on a charger with a 0.5 A internal step and it will answer
+    27.5 - not once, but every time. With a zero tolerance on the way up, the
+    blueprint saw a difference, wrote the same value again, got the same answer
+    back, and kept it up every ``command_gap`` seconds until morning: precisely
+    the wear the throttle exists to prevent. Half a station step is below one
+    step, so a genuine one-step rise still gets written.
+    """
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        inputs={"current_step": 1, "current_deadband": 2},
+        **{SOC: 50, NUMBER: setpoint(27.5, now), SWITCH: charging_since(now)},
+    )
+    assert ctx["desired_current"] == 28, "the plan wants the ceiling here"
+    assert ctx["current_rising"] is True
+    assert ctx["want_write"] is False, "half a step of slack absorbs the quantising"
+    assert ctx["needs_write"] is False
+
+
+def test_a_genuine_step_upwards_is_still_written(evaluate):
+    """The tolerance must not swallow the rise the deadband fix was about."""
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        inputs={"current_step": 1, "current_deadband": 2},
+        **{SOC: 50, NUMBER: setpoint(27, now), SWITCH: charging_since(now)},
+    )
+    assert ctx["desired_current"] == 28
+    assert ctx["current_rising"] is True
+    assert ctx["want_write"] is True
+    assert ctx["needs_write"] is True
+
+
+def test_the_setpoint_freezes_while_the_charger_status_is_unreadable(evaluate):
+    """Losing the status sensor must not stop a running charge - but it must
+    stop us steering it.
+
+    Before this, the integration could drop offline and the blueprint would
+    carry on writing setpoints to a charger it had no contact with, logging the
+    whole thing as ordinary work. The session continues; the setpoint holds
+    until the status comes back.
+    """
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        **{SOC: 50, NUMBER: setpoint(10, now), SWITCH: charging_since(now),
+           STATUS: State("unavailable")},
+    )
+    assert ctx["status_known"] is False
+    assert ctx["should_charge"] is True, "a running session is not cut"
+    assert ctx["want_write"] is True, "the plan still disagrees with the setpoint"
+    assert ctx["needs_write"] is False, "but nothing is sent"
+    assert "нечитаем" in ctx["verdict"]
+
+
+def test_a_readable_status_lets_the_setpoint_move_again(evaluate):
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        **{SOC: 50, NUMBER: setpoint(10, now), SWITCH: charging_since(now)},
+    )
+    assert ctx["status_known"] is True
+    assert ctx["needs_write"] is True

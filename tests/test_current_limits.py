@@ -80,10 +80,17 @@ def test_swapped_bounds_never_exceed_the_intended_ceiling(evaluate):
     assert ctx["desired_current"] == 6
 
 
-@pytest.mark.parametrize("step,expected_multiple", [(1, 1), (2, 2), (3, 3), (5, 5)])
-def test_current_snaps_to_the_configured_step(evaluate, step, expected_multiple):
+@pytest.mark.parametrize("step", [2, 3, 5])
+def test_current_snaps_to_the_configured_step(evaluate, step):
+    # A step of 1 is deliberately absent: ``x % 1 == 0`` holds for every whole
+    # number, so that case asserted nothing. It is covered below instead.
     ctx = evaluate(moment(23, 0), inputs={"current_step": step})
-    assert ctx["desired_current"] % expected_multiple == 0
+    assert ctx["desired_current"] % step == 0
+
+
+def test_a_step_of_one_still_yields_a_whole_number_of_amps(evaluate):
+    ctx = evaluate(moment(23, 0), inputs={"current_step": 1})
+    assert ctx["desired_current"] == int(ctx["desired_current"])
 
 
 @pytest.mark.parametrize("maximum,step", [(28, 5), (28, 3), (16, 5), (30, 4), (32, 5)])
@@ -332,3 +339,42 @@ def test_the_written_value_always_lies_inside_the_entity_range(evaluate):
             **{SOC: soc, "switch.charger": charging_since(moment(hour, 30))},
         )
         assert ctx["num_min"] <= ctx["desired_current"] <= ctx["num_max"]
+
+
+# ----------------------------------------------- limits declared by the entity
+
+
+def test_the_entity_ceiling_narrows_the_configured_maximum(evaluate):
+    """A 32 A setting on a 16 A charger must not be sent to the charger."""
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        inputs={"max_current": 32},
+        **{NUMBER: State(10, {"min": 6.0, "max": 16.0, "step": 1.0}, now)},
+    )
+    assert ctx["num_max"] == 16
+    assert ctx["desired_current"] <= 16
+
+
+def test_the_entity_floor_raises_the_configured_minimum(evaluate):
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        inputs={"min_current": 6, "target_soc": 100},
+        **{NUMBER: State(10, {"min": 8.0, "max": 32.0, "step": 1.0}, now),
+           SOC: 99},
+    )
+    assert ctx["num_min"] == 8
+    assert ctx["desired_current"] >= 8
+
+
+def test_an_entity_without_limit_attributes_falls_back_to_the_settings(evaluate):
+    """Plenty of integrations publish a ``number`` with no min/max at all."""
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        inputs={"min_current": 6, "max_current": 28},
+        **{NUMBER: State(10, {}, now)},
+    )
+    assert ctx["num_min"] == 6
+    assert ctx["num_max"] == 28

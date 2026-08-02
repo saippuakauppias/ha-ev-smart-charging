@@ -114,7 +114,47 @@ def _forgiving_round(value: Any, precision: int = 0, method: str = "common") -> 
     return int(rounded) if precision == 0 and method != "half" else rounded
 
 
+_UNSET = object()
+
+
+def _ha_float(value: Any, default: Any = _UNSET) -> Any:
+    """Home Assistant's ``float`` filter.
+
+    Vanilla Jinja quietly answers ``0.0`` for anything unconvertible; Home
+    Assistant raises unless a default was supplied. Matching that is what keeps
+    a missing ``| float(0)`` from passing here and failing at three in the
+    morning, where a template error stops the automation for the whole night.
+    """
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        if default is _UNSET:
+            raise ValueError(
+                f"float got invalid input {value!r} and no default was given"
+            ) from None
+        return default
+
+
+def _ha_int(value: Any, default: Any = _UNSET, base: int = 10) -> Any:
+    """Home Assistant's ``int`` filter; same contract as ``_ha_float``."""
+    try:
+        if isinstance(value, str):
+            return int(value, base)
+        return int(value)
+    except (ValueError, TypeError):
+        try:
+            return int(float(value))
+        except (ValueError, TypeError):
+            if default is _UNSET:
+                raise ValueError(
+                    f"int got invalid input {value!r} and no default was given"
+                ) from None
+            return default
+
+
 _ENV.filters["round"] = _forgiving_round
+_ENV.filters["float"] = _ha_float
+_ENV.filters["int"] = _ha_int
 _COMPILED: dict[str, Any] = {}
 
 
@@ -170,13 +210,27 @@ def _build_helpers(world: dict[str, State], now: dt.datetime) -> dict[str, Any]:
     }
 
 
+#: Home Assistant only accepts a rendered result as a number when it looks like
+#: one by this rule (``homeassistant.helpers.template._IS_NUMERIC``). Anything
+#: else - scientific notation, hex, underscores - stays a **string**, and the
+#: next arithmetic step on it raises. Copying the rule rather than relying on
+#: ``literal_eval`` alone is what makes the difference visible here: a template
+#: rendering ``4.9e-05`` is a real, reachable crash in Home Assistant, and a
+#: forgiving emulator turns it into a quietly passing test.
+_IS_NUMERIC = re.compile(r"^[+-]?(?!0\d)\d*(?:\.\d*)?$")
+
+
 def _coerce(rendered: str) -> Any:
     """Turn a rendered template back into a native Python value, as HA does."""
     text = rendered.strip()
     try:
-        return ast.literal_eval(text)
-    except (ValueError, SyntaxError):
+        value = ast.literal_eval(text)
+    except (ValueError, SyntaxError, MemoryError, TypeError):
         return text
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Numbers only count when the source text looks numeric to HA.
+        return value if _IS_NUMERIC.match(text) else text
+    return value
 
 
 def _render(

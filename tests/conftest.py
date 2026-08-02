@@ -107,12 +107,6 @@ def build_world(now: dt.datetime, **overrides: Any) -> dict[str, State]:
 
 
 @pytest.fixture
-def world_at():
-    """Factory fixture: ``world_at(moment(23, 0), **overrides)``."""
-    return build_world
-
-
-@pytest.fixture
 def evaluate(blueprint, base_inputs):
     """Factory that renders the blueprint variables for a given situation."""
 
@@ -130,6 +124,30 @@ def evaluate(blueprint, base_inputs):
         return blueprint.evaluate(world=merged_world, now=now, inputs=merged_inputs)
 
     return _evaluate
+
+
+@pytest.fixture
+def run(blueprint, base_inputs):
+    """Factory that runs the ``actions:`` block and returns the calls made.
+
+    Mirrors ``evaluate``: same arguments, but carries the decision out instead
+    of only reporting it.
+    """
+
+    def _run(
+        now: dt.datetime | None = None,
+        *,
+        inputs: dict[str, Any] | None = None,
+        world: dict[str, State] | None = None,
+        **world_overrides: Any,
+    ) -> list[dict[str, Any]]:
+        now = now or moment(23, 0)
+        merged_inputs = dict(base_inputs)
+        merged_inputs.update(inputs or {})
+        merged_world = world if world is not None else build_world(now, **world_overrides)
+        return blueprint.run_actions(world=merged_world, now=now, inputs=merged_inputs)
+
+    return _run
 
 
 @pytest.fixture

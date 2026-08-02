@@ -23,21 +23,6 @@ from conftest import (
 from ha_sim import State, moment
 
 
-@pytest.fixture
-def run(blueprint, base_inputs):
-    from conftest import build_world
-
-    def _run(now=None, *, inputs=None, **world_overrides):
-        now = now or moment(23, 0)
-        merged = dict(base_inputs)
-        merged.update(inputs or {})
-        return blueprint.run_actions(
-            world=build_world(now, **world_overrides), now=now, inputs=merged
-        )
-
-    return _run
-
-
 def actions_of(calls):
     return [c["action"] for c in calls if "action" in c]
 
@@ -150,17 +135,46 @@ def test_the_finish_hook_runs_after_the_charger_is_off(run):
     assert calls[-1] == {"hook": "on_finish_actions"}
 
 
-def test_the_current_is_reset_last_and_only_when_asked(run):
+def test_stopping_sends_nothing_but_the_switch_off(run):
+    """The stop itself carries no setpoint write.
+
+    It used to: a ``delay: 5`` followed by ``number.set_value``. Under
+    ``mode: restart`` that pause almost never survived, because the switch-off
+    on the line above changes the charger status, and the status is one of our
+    own triggers. The reset now happens on the following run instead.
+    """
     now = moment(3, 0)
     world = {SOC: 100, SWITCH: charging_since(now)}
-    plain = run(now, **world)
+    for inputs in ({}, {"reset_current_on_stop": True}):
+        calls = run(now, inputs=inputs, **world)
+        assert actions_of(calls) == ["switch.turn_off"]
+        assert not any("delay" in c for c in calls)
+
+
+def test_the_current_is_reset_on_a_later_run_and_only_when_asked(run):
+    """Once the charger is off and has had its gap, the setpoint goes back to
+    the minimum so a manual session cannot inherit last night's current."""
+    now = moment(9, 0)
+    idle = {SOC: 100, SWITCH: State("off", last_changed=moment(3, 0)),
+            NUMBER: setpoint(24, now, age_seconds=18000)}
+
+    plain = run(now, **idle)
     assert "number.set_value" not in actions_of(plain)
 
-    resetting = run(now, inputs={"reset_current_on_stop": True}, **world)
-    assert actions_of(resetting) == ["switch.turn_off", "number.set_value"]
-    # The reset trails the switch-off so a lost step cannot leave power flowing.
-    assert resetting[-1]["data"]["value"] == 6.0
-    assert any("delay" in c for c in resetting)
+    resetting = run(now, inputs={"reset_current_on_stop": True}, **idle)
+    assert actions_of(resetting) == ["number.set_value"]
+    assert resetting[0]["data"]["value"] == 6.0
+
+
+def test_the_reset_does_not_repeat_once_the_setpoint_is_already_low(run):
+    now = moment(9, 0)
+    calls = run(
+        now,
+        inputs={"reset_current_on_stop": True},
+        **{SOC: 100, SWITCH: State("off", last_changed=moment(3, 0)),
+           NUMBER: setpoint(6, now, age_seconds=18000)},
+    )
+    assert "number.set_value" not in actions_of(calls)
 
 
 # ------------------------------------------------------------ session flag
@@ -180,6 +194,44 @@ def test_the_session_flag_is_raised_on_start_and_cleared_on_stop(run):
         **{SESSION: "on", SOC: 100, SWITCH: charging_since(now)},
     )
     assert "input_boolean.turn_off" in actions_of(stopped)
+
+
+def test_a_flag_left_raised_by_a_manual_switch_off_is_cleared(run):
+    """The stop branch is not reachable when the charger is already off, so a
+    session ended by hand - or by the charger faulting itself out, or by a
+    restart landing between the two commands - used to leave the flag up
+    forever. The next manual session then counted as ours, and the automation
+    overrode the current the person had dialled in: exactly what the flag
+    exists to prevent.
+    """
+    now = moment(9, 0)
+    calls = run(
+        now,
+        inputs={"session_flag": SESSION},
+        **{SESSION: "on", SOC: 60, SWITCH: State("off", last_changed=moment(3, 0))},
+    )
+    assert "input_boolean.turn_off" in actions_of(calls)
+
+
+def test_a_flag_that_is_already_down_is_left_alone(run):
+    now = moment(9, 0)
+    calls = run(
+        now,
+        inputs={"session_flag": SESSION},
+        **{SESSION: "off", SOC: 60, SWITCH: State("off", last_changed=moment(3, 0))},
+    )
+    assert "input_boolean.turn_off" not in actions_of(calls)
+
+
+def test_the_flag_is_not_cleared_while_the_charger_is_running(run):
+    """Clearing it mid-session would turn our own session into a foreign one."""
+    now = moment(3, 0)
+    calls = run(
+        now,
+        inputs={"session_flag": SESSION},
+        **{SESSION: "on", SOC: 60, SWITCH: charging_since(now)},
+    )
+    assert "input_boolean.turn_off" not in actions_of(calls)
 
 
 def test_no_flag_commands_when_no_helper_is_configured(run):
@@ -286,3 +338,38 @@ def test_a_faulty_charger_is_switched_off_even_if_started_by_hand(run):
         **{SESSION: "off", STATUS: "fault", SWITCH: charging_since(now)},
     )
     assert "switch.turn_off" in actions_of(calls)
+
+
+# ------------------------------------------------------- a vanished switch
+
+
+def test_nothing_is_commanded_when_the_switch_entity_is_gone(run, blueprint,
+                                                             base_inputs):
+    """Renaming the switch, or an integration that failed to load after a
+    restart, used to leave the automation working away at nothing.
+
+    It kept computing the plan, writing setpoints and firing the start hook;
+    the switch command went to a non-existent entity and ``continue_on_error``
+    swallowed the failure. In the logbook it read as an ordinary night.
+    """
+    from conftest import build_world
+
+    now = moment(23, 0)
+    world = build_world(now)
+    del world[SWITCH]
+    calls = blueprint.run_actions(world=world, now=now, inputs=dict(base_inputs))
+
+    assert actions_of(calls) == [], f"commands were still sent: {actions_of(calls)}"
+    assert not any(c.get("hook") == "on_start_actions" for c in calls)
+
+
+def test_a_vanished_switch_raises_an_alarm(evaluate):
+    """Otherwise only the logbook knows, and only with debug logging on."""
+    from conftest import build_world
+
+    now = moment(23, 0)
+    world = build_world(now)
+    del world[SWITCH]
+    ctx = evaluate(now, world=world)
+    assert ctx["should_charge"] is False
+    assert ctx["alarm_reason"] == "switch_entity_missing"
