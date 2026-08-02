@@ -1,6 +1,10 @@
+# Файл существует ради настроек pytest и ruff: репозиторий не Python-пакет,
+# устанавливать его некуда. Секция [project] намеренно без version — версия
+# блюпринта живёт в одном месте, в описании самого блюпринта, а релизы
+# помечаются git-тегами, откуда их и берёт HACS. Дублировать её здесь значило бы
+# однажды забыть обновить и вводить в заблуждение.
 [project]
 name = "ha-ev-smart-charging"
-version = "1.0.0"
 description = "Home Assistant blueprint for adaptive overnight EV charging"
 requires-python = ">=3.11"
 

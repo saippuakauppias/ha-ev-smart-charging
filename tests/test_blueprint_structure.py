@@ -117,6 +117,7 @@ def test_expected_triggers_are_present(blueprint):
         "window_stop",
         "tick",
         "charger_status",
+        "current_written",
         "ha_start",
         "car_arrived",
         "target_hit",

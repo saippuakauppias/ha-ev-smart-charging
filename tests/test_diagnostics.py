@@ -9,6 +9,8 @@ state it was decided from (``diag``).
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 from conftest import (
     AMPERE,
@@ -57,7 +59,7 @@ def messages(calls):
     "hour,overrides,expected",
     [
         (12, {}, "вне окна"),
-        (23, {}, "запускаем"),
+        (23, {}, "ставим ток"),
         (23, {TRACKER: "not_home"}, "не дома"),
         (23, {STATUS: "available"}, "кабель не подключён"),
         (23, {LINK: "off"}, "офлайн"),
@@ -84,12 +86,17 @@ def test_reasons_for_stopping_are_named_too(evaluate, overrides, expected):
 
 
 def test_the_verdict_explains_a_deliberate_silence(evaluate):
-    """The hardest case to debug: everything is fine, so nothing happens."""
+    """The hardest case to debug: everything is fine, so nothing happens.
+
+    Uses a setpoint above the target, since a setpoint below it is now always
+    rewritten - see the deadband asymmetry.
+    """
     now = moment(23, 30)
     world = build_world(now, **{SWITCH: charging_since(now, 300)})
-    world[NUMBER] = setpoint(21, now)
-    verdict = evaluate(now, world=world)["verdict"]
-    assert "зоны нечувствительности" in verdict
+    world[NUMBER] = setpoint(23, now)
+    ctx = evaluate(now, world=world)
+    assert ctx["needs_write"] is False
+    assert "зоны нечувствительности" in ctx["verdict"]
 
 
 def test_the_verdict_explains_a_throttled_command(evaluate):
@@ -108,6 +115,31 @@ def test_a_hand_started_session_says_why_it_is_untouched(evaluate):
     world[NUMBER] = setpoint(10, now)
     ctx = evaluate(now, inputs={"session_flag": SESSION}, world=world)
     assert "вручную" in ctx["verdict"]
+
+
+def test_the_two_steps_of_a_start_are_named_separately(evaluate):
+    """Starting takes two runs now; each has to say which one it is."""
+    now = moment(23, 0)
+    world = build_world(now)
+    world[NUMBER] = setpoint(10, now, age_seconds=18000)
+    world[SWITCH] = State("off", last_changed=now - dt.timedelta(hours=5))
+    assert "включим следующим шагом" in evaluate(now, world=world)["verdict"]
+
+    world[NUMBER] = setpoint(21, now, age_seconds=18000)
+    assert "запускаем зарядку" in evaluate(now, world=world)["verdict"]
+
+
+def test_a_missing_switch_entity_is_named_outright(evaluate):
+    """Renaming the switch, or an integration that failed to load, otherwise
+    reads as unexplained idleness: a missing entity reports age zero, and age
+    zero blocks switching on forever via the command throttle."""
+    now = moment(3, 0)
+    world = build_world(now)
+    del world[SWITCH]
+    ctx = evaluate(now, world=world)
+    assert ctx["switch_present"] is False
+    assert "не найден" in ctx["verdict"]
+    assert SWITCH in ctx["verdict"], "name the entity, so it can be looked up"
 
 
 def test_a_charger_that_draws_no_current_says_so(evaluate):
@@ -167,6 +199,84 @@ def test_the_verdict_is_never_empty_or_unrendered(evaluate, hour, overrides):
 
 
 # --------------------------------------------------------------------- diag
+
+
+def test_the_verdict_and_the_stop_reason_never_disagree(evaluate):
+    """A car that drove off takes the cable with it, so both "away" and
+    "unplugged" hold at once. If the two fields ranked them differently, the
+    logbook and the trace would blame different things for one stop."""
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        **{
+            TRACKER: "not_home",
+            STATUS: "available",
+            POWER: 0,
+            AMPERE: 0,
+            SWITCH: charging_since(now),
+        },
+    )
+    assert ctx["stop_reason"] == "car_not_home"
+    assert "не дома" in ctx["verdict"]
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({LINK: "off"}, "charger_offline"),
+        ({STATUS: State("unknown")}, "status_unknown"),
+    ],
+)
+def test_stops_that_used_to_report_nothing_now_name_themselves(
+    evaluate, overrides, expected
+):
+    """Both used to fall through to a catch-all that named no cause at all."""
+    now = moment(3, 0)
+    ctx = evaluate(now, **{SWITCH: charging_since(now), **overrides})
+    assert ctx["stop_reason"] == expected
+
+
+def test_a_healthy_run_reports_no_stop_reason(evaluate):
+    """Any value here reads as a cause; while nothing is being stopped there
+    is no cause to report."""
+    now = moment(3, 0)
+    ctx = evaluate(now, **{SWITCH: charging_since(now)})
+    assert ctx["must_stop"] is False
+    assert ctx["stop_reason"] == "none"
+
+
+def test_command_flags_are_silent_when_the_branch_cannot_run(evaluate):
+    """These 16 runs made up most of the night: the car was gone, no command
+    could possibly be sent, yet the snapshot claimed a write was pending."""
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        **{
+            TRACKER: "not_home",
+            STATUS: "available",
+            POWER: 0,
+            AMPERE: 0,
+            SWITCH: State("off", last_changed=now - dt.timedelta(hours=3)),
+        },
+    )
+    assert ctx["should_charge"] is False
+    commands = ctx["diag"]["команды"]
+    assert commands["записать_ток"] is False
+    assert commands["включить"] is False
+    assert commands["выставить_режим"] is False
+
+
+def test_the_stop_entry_carries_what_the_stop_was_judged_on(run):
+    """The most important line of the night was also the least informative:
+    it named the reason but not the evidence, so a tracker that lied while
+    17.6 A were flowing looked exactly like a car that had driven away."""
+    now = moment(3, 0)
+    written = messages(run(now, **{SOC: 100, SWITCH: charging_since(now, 200)}))
+    assert written
+    entry = written[0]
+    assert "трекер=" in entry, "what the tracker claimed"
+    assert "шло" in entry, "what the charger was actually delivering"
+    assert "сессия длилась" in entry
 
 
 def test_the_snapshot_is_a_structure_not_a_string(evaluate):

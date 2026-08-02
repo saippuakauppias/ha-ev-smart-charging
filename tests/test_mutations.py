@@ -59,8 +59,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a running session is cut off when GPS drops out",
-        "{{ car_home or (not location_known) }}",
-        "{{ car_home }}",
+        "    {{ car_home or (not location_known) or physically_present }}",
+        "    {{ car_home }}",
     ),
     (
         "charging starts while the car is away",
@@ -109,8 +109,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "the deadband blocks reaching the boundary current",
-        "or (at_boundary and setpoint_differs) }}",
-        "}}",
+        "\n       or (at_boundary and setpoint_differs) }}",
+        " }}",
     ),
     # ---- behaviour added or repaired in 1.1.0 ----
     (
@@ -172,8 +172,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a charger that never switches on is commanded on every tick",
-        '  needs_turn_on: "{{ not switch_on and switch_gap_elapsed }}"',
-        '  needs_turn_on: "{{ not switch_on }}"',
+        "    {{ not switch_on and switch_gap_elapsed and not needs_write }}",
+        "    {{ not switch_on and not needs_write }}",
     ),
     (
         "a hand-started session has its current overridden",
@@ -231,8 +231,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "the verdict reports a later reason than the one that decided",
-        "{% if not charger_online %}станция офлайн",
-        "{% if false %}станция офлайн",
+        "{% elif not charger_online %}станция офлайн",
+        "{% elif false %}станция офлайн",
     ),
     (
         "the snapshot drifts from the values it claims to report",
@@ -242,6 +242,50 @@ MUTATIONS: list[tuple[str, str, str]] = [
     (
         "a charger drawing no current still reports itself as healthy",
         "{% elif no_power_alarm %}включено, но ток не идёт ({{ alarm_reason }})\n    ",
+        "",
+    ),
+    (
+        "a lying tracker cuts a session that is visibly drawing current",
+        "    {{ car_home or (not location_known) or physically_present }}",
+        "    {{ car_home or (not location_known) }}",
+    ),
+    (
+        "the deadband swallows a request to raise the current",
+        "         > (0 if (current_rising or not switch_on) else deadband | float(2))",
+        "         > deadband | float(2)",
+    ),
+    (
+        "the setpoint and the switch-on go out in the same run",
+        "    {{ not switch_on and switch_gap_elapsed and not needs_write }}",
+        "    {{ not switch_on and switch_gap_elapsed }}",
+    ),
+    (
+        "the start notification repeats on every retry",
+        '                    value_template: "{{ first_turn_on_attempt }}"',
+        '                    value_template: "{{ true }}"',
+    ),
+    (
+        "the verdict and the stop reason rank causes differently",
+        "    {% elif car_left %}машина не дома\n"
+        "    {% elif not plugged_in %}кабель не подключён",
+        "    {% elif not plugged_in %}кабель не подключён\n"
+        "    {% elif car_left %}машина не дома",
+    ),
+    (
+        "an offline charger and an unreadable status report no cause",
+        "    {% elif not charger_online %}charger_offline\n"
+        "    {% elif not status_known %}status_unknown\n",
+        "",
+    ),
+    (
+        "the snapshot claims commands that no branch can send",
+        "        'записать_ток': needs_write and should_charge,",
+        "        'записать_ток': needs_write,",
+    ),
+    (
+        "the stop entry drops the evidence the stop was judged on",
+        "                    трекер={{ tracker_state }}"
+        "{{ ' (дома)' if car_home else '' }},\n",
         "",
     ),
 ]

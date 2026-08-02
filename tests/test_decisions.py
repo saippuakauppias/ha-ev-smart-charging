@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import pytest
 from conftest import (
+    AMPERE,
     LINK,
     NUMBER,
+    POWER,
     PROBLEM,
     SESSION,
     SOC,
@@ -250,7 +252,9 @@ def test_emergency_is_off_by_default(evaluate):
         ({STATUS: "fault"}, "fault"),
         ({SOC: 100}, "target_reached"),
         ({STATUS: "charged"}, "charger_reports_charged"),
-        ({TRACKER: "not_home"}, "car_not_home"),
+        # A real departure takes the cable with it, so the current stops too.
+        ({TRACKER: "not_home", STATUS: "available", POWER: 0, AMPERE: 0},
+         "car_not_home"),
         ({STATUS: "available"}, "unplugged"),
     ],
 )

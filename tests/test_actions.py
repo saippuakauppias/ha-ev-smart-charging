@@ -45,16 +45,43 @@ def actions_of(calls):
 # ------------------------------------------------------------ starting up
 
 
-def test_starting_a_session_sets_the_current_before_switching_on(run):
+def settled(now, value=21):
+    """A setpoint that already holds the right value and is old enough to have
+    cleared the command gap - the state in which the switch may go out."""
+    return {NUMBER: setpoint(value, now, age_seconds=18000)}
+
+
+def test_the_current_is_set_before_the_switch_is_touched(run):
     """Switching on first would let the charger start at whatever setpoint was
     left over from last night - possibly the maximum."""
     calls = run()
-    assert actions_of(calls) == ["number.set_value", "switch.turn_on"]
+    assert actions_of(calls) == ["number.set_value"]
+    assert "switch.turn_on" not in actions_of(calls)
+
+
+def test_the_switch_follows_on_the_next_run(run):
+    """Two commands in one run arrive milliseconds apart and cheap chargers
+    drop the second, so they are spread across recalculations."""
+    now = moment(23, 0)
+    calls = run(now, **settled(now))
+    assert actions_of(calls) == ["switch.turn_on"]
 
 
 def test_the_start_hook_runs_after_the_charger_is_on(run):
-    calls = run()
+    """The setpoint written a moment ago is what marks a genuine start: the
+    switch-on command always queues directly behind it."""
+    now = moment(23, 0)
+    calls = run(now, **{NUMBER: setpoint(21, now, age_seconds=65)})
     assert calls[-1] == {"hook": "on_start_actions"}
+
+
+def test_the_start_notification_is_not_repeated_on_every_retry(run):
+    """A charger that ignores turn_on gets the command again next time, but
+    "charging started" must not arrive with it every half hour all night."""
+    now = moment(23, 0)
+    calls = run(now, **settled(now))
+    assert "switch.turn_on" in actions_of(calls), "the retry still happens"
+    assert not any(c.get("hook") == "on_start_actions" for c in calls)
 
 
 def test_the_setpoint_written_is_the_one_that_was_calculated(run, evaluate):
@@ -140,7 +167,10 @@ def test_the_current_is_reset_last_and_only_when_asked(run):
 
 
 def test_the_session_flag_is_raised_on_start_and_cleared_on_stop(run):
-    started = run(inputs={"session_flag": SESSION}, **{SESSION: "off"})
+    now = moment(23, 0)
+    started = run(
+        now, inputs={"session_flag": SESSION}, **{SESSION: "off", **settled(now)}
+    )
     assert "input_boolean.turn_on" in actions_of(started)
 
     now = moment(3, 0)

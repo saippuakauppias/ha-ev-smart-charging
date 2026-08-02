@@ -164,7 +164,7 @@ def night_inputs(base_inputs):
             "max_current": 28,
             "current_step": 1,
             "time_reserve_minutes": 30,
-            "current_deadband": 3,
+            "current_deadband": 2,
             "command_gap": 60,
             "efficiency": 88,
             "battery_capacity": 43,
@@ -352,8 +352,14 @@ def test_a_car_arriving_mid_window_starts_charging_late(blueprint, night_inputs)
 
 
 def test_a_car_leaving_mid_night_ends_the_session(blueprint, night_inputs):
+    """Driving away unplugs the cable, so the current stops with it - that is
+    what separates a real departure from a tracker having a bad minute."""
     log = simulate_night(
-        blueprint, night_inputs, events={8: {TRACKER: "not_home"}}
+        blueprint,
+        night_inputs,
+        events={
+            8: {TRACKER: "not_home", STATUS: "available", POWER: 0, AMPERE: 0}
+        },
     )
     assert log.switch_commands == ["on", "off"]
     assert log.stop_reason == "car_not_home"

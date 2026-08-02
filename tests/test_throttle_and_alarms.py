@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import datetime as dt
+
 import pytest
 from conftest import (
     AMPERE,
@@ -90,11 +92,87 @@ def test_the_first_command_of_a_session_ignores_the_gap(evaluate):
 
 
 def test_small_drift_does_not_rewrite_the_setpoint(evaluate):
-    """Recalculating every half hour always yields a slightly different number."""
+    """Recalculating every half hour always yields a slightly different number.
+
+    Only downward drift is absorbed - see the asymmetry tests below.
+    """
+    now = moment(23, 0)
+    ctx = evaluate(now, **{NUMBER: setpoint(22, now), "switch.charger": charging_since(now)})
+    assert abs(ctx["desired_current"] - ctx["current_now"]) < 3
+    assert ctx["current_rising"] is False
+    assert ctx["needs_write"] is False
+
+
+# ------------------------------------------------- the deadband is asymmetric
+
+
+def test_a_request_to_raise_the_current_is_never_absorbed(evaluate):
+    """The defect that cost a full charge on the first real night.
+
+    A higher setpoint is the regulator saying "at this rate we miss the
+    target". Swallowing that because the step is small means deliberately
+    under-charging: four consecutive recalculations asked for 20-21 A against
+    a setpoint of 19 A, every one was absorbed by the 3 A deadband, and the
+    car reached 83% instead of 100%.
+    """
     now = moment(23, 0)
     ctx = evaluate(now, **{NUMBER: setpoint(20, now), "switch.charger": charging_since(now)})
-    assert abs(ctx["desired_current"] - ctx["current_now"]) < 3
+    assert ctx["desired_current"] > ctx["current_now"]
+    assert ctx["desired_current"] - ctx["current_now"] < 3, "well inside the deadband"
+    assert ctx["current_rising"] is True
+    assert ctx["needs_write"] is True
+
+
+def test_settling_down_onto_a_boundary_ignores_the_deadband(evaluate):
+    """Coming down to exactly the ceiling (or floor) is written even when the
+    step is small. Otherwise a charger that rounds the boundary its own way
+    leaves the setpoint permanently a little off, and the difference is never
+    large enough to clear the deadband - so it would never be corrected.
+
+    Raising the current is already always written; this covers the way down,
+    which is the only case where the boundary exception still does work.
+    """
+    now = moment(3, 0)
+    ctx = evaluate(
+        now,
+        **{NUMBER: setpoint(30, now), SOC: 20, "switch.charger": charging_since(now)},
+    )
+    assert ctx["desired_current"] < ctx["current_now"], "we are coming down"
+    assert ctx["current_now"] - ctx["desired_current"] < 3, "inside the deadband"
+    assert ctx["at_boundary"] is True
+    assert ctx["setpoint_differs"] is True
+    assert ctx["needs_write"] is True
+
+
+def test_a_request_to_lower_the_current_still_waits_for_the_deadband(evaluate):
+    """Nothing is at stake in lowering the current: an extra ampere never
+    prevents reaching the target, while rewriting the setpoint for fractions
+    of an ampere wears out the charger. This is what the deadband is for.
+
+    The deadband is stated explicitly rather than relying on the default, so
+    that the test keeps testing the rule if the default is ever retuned.
+    """
+    now = moment(23, 0)
+    world = {NUMBER: setpoint(23, now), "switch.charger": charging_since(now)}
+    ctx = evaluate(now, inputs={"current_deadband": 4}, **world)
+    assert ctx["desired_current"] < ctx["current_now"]
+    assert ctx["current_now"] - ctx["desired_current"] < 4, "inside the deadband"
+    assert ctx["current_rising"] is False
     assert ctx["needs_write"] is False
+
+
+def test_the_deadband_is_a_strict_threshold(evaluate):
+    """A drop of exactly the deadband is written; only smaller ones are held
+    back. Otherwise "deadband 0" would mean "never write" instead of "write on
+    any difference"."""
+    now = moment(23, 0)
+    world = {NUMBER: setpoint(23, now), "switch.charger": charging_since(now)}
+    exactly_two = evaluate(now, inputs={"current_deadband": 2}, **world)
+    assert exactly_two["current_now"] - exactly_two["desired_current"] == 2
+    assert exactly_two["needs_write"] is False
+
+    smaller = evaluate(now, inputs={"current_deadband": 1}, **world)
+    assert smaller["needs_write"] is True
 
 
 def test_a_real_change_does_rewrite_the_setpoint(evaluate):
@@ -112,12 +190,12 @@ def test_the_deadband_compares_setpoint_with_setpoint(evaluate):
     ctx = evaluate(
         now,
         **{
-            NUMBER: setpoint(20, now),
+            NUMBER: setpoint(22, now),
             AMPERE: 18.3,
             "switch.charger": charging_since(now),
         },
     )
-    assert ctx["current_now"] == 20
+    assert ctx["current_now"] == 22
     assert ctx["actual_current"] == 18.3
     assert ctx["needs_write"] is False
 
@@ -131,7 +209,7 @@ def test_starting_a_session_always_writes(evaluate):
 
 def test_a_narrower_deadband_writes_more_often(evaluate):
     now = moment(23, 0)
-    world = {NUMBER: setpoint(20, now), "switch.charger": charging_since(now)}
+    world = {NUMBER: setpoint(23, now), "switch.charger": charging_since(now)}
     assert evaluate(now, inputs={"current_deadband": 3}, **world)["needs_write"] is False
     assert evaluate(now, inputs={"current_deadband": 0}, **world)["needs_write"] is True
 
@@ -265,12 +343,47 @@ def test_a_charger_that_refuses_to_switch_on_is_not_hammered(evaluate):
     """If turn_on has no effect the switch stays off, and without throttling
     both the command and the start notification would repeat on every tick."""
     now = moment(23, 0)
-    fresh = evaluate(now, **{"switch.charger": State("off", last_changed=now)})
+    settled_setpoint = {NUMBER: setpoint(21, now, age_seconds=18000)}
+
+    fresh = evaluate(
+        now, **{"switch.charger": State("off", last_changed=now), **settled_setpoint}
+    )
     assert fresh["should_charge"] is True
     assert fresh["needs_turn_on"] is False
 
-    settled = evaluate(now)
+    settled = evaluate(now, **settled_setpoint)
     assert settled["needs_turn_on"] is True
+
+
+def test_the_switch_waits_a_turn_when_the_setpoint_was_just_written(evaluate):
+    """Cheap chargers drop a command that arrives on the heels of another one.
+    On the first real night the setpoint and the switch went out 14 ms apart,
+    so the two are now deliberately spread across separate recalculations."""
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        **{
+            "switch.charger": State("off", last_changed=now - dt.timedelta(hours=5)),
+            NUMBER: setpoint(10, now, age_seconds=18000),
+        },
+    )
+    assert ctx["needs_write"] is True, "the setpoint is wrong and must be fixed"
+    assert ctx["needs_turn_on"] is False, "so switching on waits for the next run"
+
+
+def test_a_correct_setpoint_lets_the_switch_go_first_time(evaluate):
+    """Queueing must not cost a recalculation when there is nothing to queue
+    behind: a setpoint that is already right means the switch goes now."""
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        **{
+            "switch.charger": State("off", last_changed=now - dt.timedelta(hours=5)),
+            NUMBER: setpoint(21, now, age_seconds=18000),
+        },
+    )
+    assert ctx["needs_write"] is False
+    assert ctx["needs_turn_on"] is True
 
 
 def test_an_empty_mode_value_is_never_written(evaluate):

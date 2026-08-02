@@ -86,8 +86,8 @@ jobs:
       - name: Install ruff
         run: pip install ruff
 
-      - name: Lint the test harness
-        run: ruff check tests/
+      - name: Lint the test harness and tools
+        run: ruff check tests/ tools/
 
   home-assistant-schema:
     name: Home Assistant schema (informational)
