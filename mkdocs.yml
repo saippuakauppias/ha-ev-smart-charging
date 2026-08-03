@@ -15,10 +15,13 @@ site_dir: site
 theme:
   name: material
   language: ru
+  # Логотип и favicon — свои файлы, а не встроенные иконки темы: тот же
+  # силуэт используется в README, и держать его в одном месте надёжнее,
+  # чем полагаться на то, что material/ev-station не изменится.
+  logo: assets/logo.svg
+  favicon: assets/logo-badge.svg
   icon:
     repo: fontawesome/brands/github
-    logo: material/ev-station
-  favicon: assets/favicon.svg
   palette:
     # Светлая тема по умолчанию, с переключателем.
     - media: "(prefers-color-scheme: light)"
@@ -36,9 +39,11 @@ theme:
         icon: material/weather-sunny
         name: Светлая тема
   features:
-    - navigation.tabs
-    - navigation.tabs.sticky
-    - navigation.sections
+    # Без `tabs` разделы не уезжают в верхнюю панель, а остаются деревом
+    # в левом меню: видно и раздел, и вложенные страницы разом. Верхняя
+    # панель показывала только текущий раздел, и связь «страница ↔ раздел»
+    # приходилось достраивать в уме.
+    - navigation.expand
     - navigation.top
     - navigation.instant
     - navigation.instant.progress
@@ -129,6 +134,7 @@ nav:
   - Разработка:
       - development/index.md
       - development/contributing.md
+      - development/publishing.md
       - development/security.md
   - Проект:
       - ideas.md

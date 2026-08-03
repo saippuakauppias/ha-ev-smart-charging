@@ -135,15 +135,15 @@ jobs:
           python tools/trace_report.py _ci_traces --json > /dev/null
 
   packaging:
-    name: HACS metadata
+    name: Release metadata
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
 
       # The version lives in the blueprint description and nowhere else, so it
       # can silently disagree with the changelog. A tag disagreeing with either
-      # is worse: HACS serves tags, so users would install something whose
-      # notes describe a different release.
+      # is worse: a release note would then describe something other than what
+      # the tag actually contains.
       - name: Version agrees between the blueprint and the changelog
         run: |
           python - <<'PY'
@@ -163,20 +163,22 @@ jobs:
           print(f"version {version} agrees across the blueprint and CHANGELOG")
           PY
 
-      # hacs.json is never exercised by the test suite, but a typo in it breaks
-      # installation for every HACS user and only surfaces as a bug report.
-      - name: Validate hacs.json and the blueprint layout
+      # Home Assistant imports a blueprint into config/blueprints/<domain>/<slug>/,
+      # and the import URL in the README and the docs is spelled out by hand.
+      # A moved or renamed file leaves both pointing at a 404, which nobody
+      # notices until someone tries to install.
+      - name: Blueprint layout matches the documented import URL
         run: |
           python - <<'PY'
-          import json, pathlib, sys
-          meta = json.loads(pathlib.Path("hacs.json").read_text(encoding="utf-8"))
-          if not meta.get("name"):
-              sys.exit("hacs.json: name is required")
-          # HACS installs blueprints by directory layout: blueprints/<domain>/<slug>/
+          import pathlib, sys
           found = list(pathlib.Path("blueprints").glob("*/*/*.yaml"))
           if not found:
               sys.exit("no blueprint found under blueprints/<domain>/<slug>/")
-          print("hacs.json OK;", ", ".join(str(p) for p in found))
+          docs = pathlib.Path("README.md").read_text(encoding="utf-8")
+          for path in found:
+              if path.name not in docs:
+                  sys.exit(f"{path} is not the file the README tells people to import")
+          print("layout OK;", ", ".join(str(p) for p in found))
           PY
 
   home-assistant-schema:

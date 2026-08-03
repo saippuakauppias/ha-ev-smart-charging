@@ -4,32 +4,40 @@
 
     Блюпринт использует секции в настройках и современный синтаксис триггеров.
 
-## Вариант 1 — импорт по ссылке (рекомендуется)
+## Вариант 1 — кнопка импорта (рекомендуется)
+
+[![Открыть блюпринт в своём Home Assistant](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fsaippuakauppias%2Fha-ev-smart-charging%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fev_smart_charging%2Fev_smart_charging.yaml)
+
+Кнопка открывает диалог импорта в вашем Home Assistant — останется нажать
+*Импортировать блюпринт*.
+
+## Вариант 2 — импорт по ссылке
+
+Если кнопка не сработала (сервис `my.home-assistant.io` не настроен или
+недоступен), сделайте то же вручную:
 
 1. Настройки → Автоматизации и сцены → Блюпринты → **Импортировать блюпринт**.
-2. Вставьте ссылку на файл блюпринта в этом репозитории:
+2. Вставьте ссылку на файл блюпринта:
 
 ```
 https://raw.githubusercontent.com/saippuakauppias/ha-ev-smart-charging/refs/heads/main/blueprints/automation/ev_smart_charging/ev_smart_charging.yaml
 ```
 
-## Вариант 2 — через HACS
-
-Репозиторий оформлен как источник блюпринтов для HACS: в HACS → ⋮ →
-**Custom repositories** его можно добавить как
-`https://github.com/saippuakauppias/ha-ev-smart-charging` с категорией
-*Blueprint*.
-
-!!! warning "Пока не работает: нет опубликованных версий"
-
-    HACS ставит блюпринты по git-тегам, а показ ветки по умолчанию в этом
-    репозитории отключён. Пока в нём нет ни одного тега, устанавливать
-    оттуда нечего — пользуйтесь импортом по ссылке.
-
 ## Вариант 3 — вручную
 
 Скопируйте `blueprints/automation/ev_smart_charging/ev_smart_charging.yaml`
 в `config/blueprints/automation/ev_smart_charging/` и перезагрузите автоматизации.
+
+## Почему не через HACS
+
+HACS блюпринты **не поддерживает**: в списке его категорий есть интеграции,
+темы, шаблоны, python-скрипты и AppDaemon — блюпринтов там нет. Добавить
+репозиторий как custom repository не выйдет, потому что при добавлении нужно
+выбрать категорию, а подходящей не существует.
+
+Обновлять блюпринт нужно самостоятельно: повторный импорт по той же ссылке
+перезаписывает файл и **сохраняет все настройки** уже созданных автоматизаций.
+Следить за выходом версий удобно через *Watch → Releases* на GitHub.
 
 ## Дальше
 

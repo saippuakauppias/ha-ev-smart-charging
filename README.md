@@ -1,4 +1,7 @@
-# EV Smart Charging — блюпринт нежной зарядки для Home Assistant
+<h1>
+  <img src="docs/assets/logo-badge.svg" alt="" width="32" height="32" align="top" hspace="6">
+  EV Smart Charging — блюпринт нежной зарядки для Home Assistant
+</h1>
 
 [![CI](https://github.com/saippuakauppias/ha-ev-smart-charging/actions/workflows/ci.yml/badge.svg)](https://github.com/saippuakauppias/ha-ev-smart-charging/actions/workflows/ci.yml)
 [![Docs](https://github.com/saippuakauppias/ha-ev-smart-charging/actions/workflows/docs.yml/badge.svg)](https://saippuakauppias.github.io/ha-ev-smart-charging/)
@@ -42,14 +45,16 @@
 
 ## Установка
 
-Настройки → Автоматизации и сцены → Блюпринты → **Импортировать блюпринт**,
-и вставьте ссылку:
+[![Открыть блюпринт в своём Home Assistant](https://my.home-assistant.io/badges/blueprint_import.svg)](https://my.home-assistant.io/redirect/blueprint_import/?blueprint_url=https%3A%2F%2Fgithub.com%2Fsaippuakauppias%2Fha-ev-smart-charging%2Fblob%2Fmain%2Fblueprints%2Fautomation%2Fev_smart_charging%2Fev_smart_charging.yaml)
+
+Или вручную: Настройки → Автоматизации и сцены → Блюпринты →
+**Импортировать блюпринт**, и вставьте ссылку:
 
 ```
 https://raw.githubusercontent.com/saippuakauppias/ha-ev-smart-charging/refs/heads/main/blueprints/automation/ev_smart_charging/ev_smart_charging.yaml
 ```
 
-**Требуется Home Assistant 2024.10 или новее.** Установка вручную и через HACS —
+**Требуется Home Assistant 2024.10 или новее.** Подробнее —
 [в документации](https://saippuakauppias.github.io/ha-ev-smart-charging/getting-started/installation/).
 
 ## Быстрый старт
