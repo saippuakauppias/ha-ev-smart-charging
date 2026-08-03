@@ -25,7 +25,7 @@ BLUEPRINT = (
     / "blueprints"
     / "automation"
     / "ev_smart_charging"
-    / "ev_smart_night_charging.yaml"
+    / "ev_smart_charging.yaml"
 )
 
 

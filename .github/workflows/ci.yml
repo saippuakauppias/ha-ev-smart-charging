@@ -29,7 +29,9 @@ jobs:
         run: pip install yamllint
 
       - name: Lint YAML sources
-        run: yamllint -c .yamllint.yaml blueprints/ .github/ .yamllint.yaml
+        run: >-
+          yamllint -c .yamllint.yaml
+          blueprints/ .github/ .yamllint.yaml mkdocs.yml
 
   test:
     name: Tests (Python ${{ matrix.python-version }})
@@ -147,7 +149,7 @@ jobs:
           python - <<'PY'
           import pathlib, re, sys
           bp = pathlib.Path("blueprints/automation/ev_smart_charging"
-                            "/ev_smart_night_charging.yaml").read_text(encoding="utf-8")
+                            "/ev_smart_charging.yaml").read_text(encoding="utf-8")
           found = re.search(r"Версия\s+(\d+\.\d+\.\d+)", bp)
           if not found:
               sys.exit("no version found in the blueprint description")

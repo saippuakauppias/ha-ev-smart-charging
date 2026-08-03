@@ -14,7 +14,7 @@ BLUEPRINT_PATH = (
     / "blueprints"
     / "automation"
     / "ev_smart_charging"
-    / "ev_smart_night_charging.yaml"
+    / "ev_smart_charging.yaml"
 )
 
 # Entity ids used throughout the suite. Deliberately short and neutral so that

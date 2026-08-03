@@ -1,0 +1,81 @@
+---
+name: Docs
+
+on:
+  push:
+    branches: [main]
+    # Сборка сайта не зависит от кода блюпринта и тестов, поэтому обычный
+    # коммит в них не должен занимать очередь деплоя. mkdocs.yml и содержимое
+    # docs/ — зависят; CHANGELOG, CONTRIBUTING и SECURITY втягиваются
+    # в страницы сниппетами, поэтому тоже перечислены.
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - requirements-docs.txt
+      - CHANGELOG.md
+      - CONTRIBUTING.md
+      - SECURITY.md
+      - .github/workflows/docs.yml
+  pull_request:
+    paths:
+      - docs/**
+      - mkdocs.yml
+      - requirements-docs.txt
+      - CHANGELOG.md
+      - CONTRIBUTING.md
+      - SECURITY.md
+      - .github/workflows/docs.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-docs.txt
+
+      - name: Install documentation dependencies
+        run: pip install -r requirements-docs.txt
+
+      # --strict превращает битую ссылку в ошибку сборки. Документация
+      # к автоматизации, управляющей силовым оборудованием, ссылается сама
+      # на себя постоянно, и молча уехавший якорь уводит читателя мимо
+      # предупреждения о безопасности.
+      - name: Build the site
+        run: mkdocs build --strict
+
+      - name: Upload the built site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    name: Deploy to GitHub Pages
+    # Публикуется только main: превью пул-реквеста должно собраться,
+    # но не заменять живой сайт.
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish
+        id: deployment
+        uses: actions/deploy-pages@v4

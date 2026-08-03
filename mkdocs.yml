@@ -1,0 +1,135 @@
+---
+site_name: EV Smart Charging
+site_description: >-
+  Блюпринт Home Assistant для умной ночной зарядки электромобиля:
+  динамический подбор тока, растяжка на окно, отказоустойчивость.
+site_url: https://saippuakauppias.github.io/ha-ev-smart-charging/
+repo_url: https://github.com/saippuakauppias/ha-ev-smart-charging
+repo_name: saippuakauppias/ha-ev-smart-charging
+edit_uri: edit/main/docs/
+copyright: MIT — свободно используйте, изменяйте и распространяйте
+
+docs_dir: docs
+site_dir: site
+
+theme:
+  name: material
+  language: ru
+  icon:
+    repo: fontawesome/brands/github
+    logo: material/ev-station
+  favicon: assets/favicon.svg
+  palette:
+    # Светлая тема по умолчанию, с переключателем.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-night
+        name: Тёмная тема
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: teal
+      accent: teal
+      toggle:
+        icon: material/weather-sunny
+        name: Светлая тема
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - navigation.indexes
+    - toc.follow
+    - search.highlight
+    - search.share
+    - search.suggest
+    - content.code.copy
+    - content.action.edit
+    - content.tooltips
+
+extra_css:
+  - assets/extra.css
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  # Стандартный slugify выбрасывает не-ASCII, поэтому кириллические заголовки
+  # получают якоря вида `#_3` — они нечитаемы и, что хуже, съезжают на другой
+  # раздел, стоит вставить заголовок выше. Unicode-версия даёт `#журнал`.
+  - toc:
+      permalink: "¶"
+      permalink_title: Ссылка на этот раздел
+      slugify: !!python/object/apply:pymdownx.slugs.slugify {kwds: {case: lower}}
+  - pymdownx.details
+  # Без этого блока иконки вида `:material-cog-outline:` на главной остаются
+  # текстом, а не превращаются в значки.
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.keys
+  - pymdownx.smartsymbols
+
+plugins:
+  - search:
+      lang:
+        - ru
+        - en
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/saippuakauppias/ha-ev-smart-charging
+      name: Репозиторий на GitHub
+
+# Нестрогий режим здесь невозможен: битая ссылка в документации по железу
+# дороже, чем упавшая сборка. CI собирает сайт именно с --strict.
+strict: true
+
+nav:
+  - Обзор:
+      - index.md
+      - guide/features.md
+      - guide/how-it-works.md
+  - Начало работы:
+      - getting-started/installation.md
+      - getting-started/quick-start.md
+      - getting-started/examples.md
+  - Руководство:
+      - guide/settings.md
+      - guide/reliability.md
+      - guide/notifications.md
+  - Диагностика:
+      - diagnostics/index.md
+      - diagnostics/traces.md
+      - diagnostics/trace-report.md
+      - diagnostics/faq.md
+  - Разработка:
+      - development/index.md
+      - development/contributing.md
+      - development/security.md
+  - Проект:
+      - ideas.md
+      - changelog.md

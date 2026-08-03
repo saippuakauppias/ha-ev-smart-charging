@@ -17,8 +17,7 @@
 
 - настройки автоматизации (без токенов и координат);
 - трассировки, на которых видно поведение, — их удобно собрать
-  `python3 tools/trace_report.py ~/Downloads` (см. раздел «Диагностика»
-  в [README](README.md));
+  `python3 tools/trace_report.py ~/Downloads` (см. [раздел «Диагностика»](https://saippuakauppias.github.io/ha-ev-smart-charging/diagnostics/));
 - модель станции и интеграцию, через которую она подключена.
 
 ## Что в область ответственности не входит

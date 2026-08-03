@@ -5,7 +5,12 @@ contact_links:
     url: https://github.com/saippuakauppias/ha-ev-smart-charging/discussions
     about: >-
       Предложения обсуждаем в Discussions. Часть уже обдуманных идей собрана
-      в IDEAS.md — загляните туда, возможно ваша там уже есть.
+      на странице «Идеи на будущее» — загляните туда, возможно ваша там уже есть.
+  - name: 📖 Документация
+    url: https://saippuakauppias.github.io/ha-ev-smart-charging/
+    about: >-
+      Настройка, поведение при сбоях, разбор ночи по журналу и трассировкам,
+      а также список уже обдуманных идей.
   - name: 🔒 Проблема безопасности
     url: https://github.com/saippuakauppias/ha-ev-smart-charging/security/advisories/new
     about: >-

@@ -457,7 +457,7 @@ def test_the_suite_detects_a_broken_blueprint(
 ):
     blueprint = (
         sandbox / "blueprints" / "automation" / "ev_smart_charging"
-        / "ev_smart_night_charging.yaml"
+        / "ev_smart_charging.yaml"
     )
     pristine = blueprint.read_text(encoding="utf-8")
     assert original in pristine, (
