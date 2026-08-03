@@ -124,6 +124,32 @@ def test_expected_triggers_are_present(blueprint):
     }
 
 
+def test_charger_state_triggers_ignore_entities_going_unavailable(blueprint):
+    """A dropout must not fire the automation on its way down.
+
+    The station's integration drops every entity at once and restores them a
+    tick apart. In ``mode: restart`` each of those transitions kills the run
+    before it, and the second real night saw four passes inside two seconds —
+    none of which could decide anything, because the state they were reading
+    was precisely what had gone missing.
+
+    Only the destination is filtered. Coming *back* from ``unavailable`` is the
+    one moment the automation learns the station returned, so ``not_from``
+    would throw away the signal along with the noise.
+    """
+    watched = {"charger_status", "current_written"}
+    seen = set()
+    for trigger in blueprint.triggers:
+        if trigger.get("id") not in watched:
+            continue
+        seen.add(trigger["id"])
+        assert trigger.get("not_to") == ["unknown", "unavailable"], trigger["id"]
+        assert "not_from" not in trigger, (
+            f"{trigger['id']} must still fire when the entity comes back"
+        )
+    assert seen == watched, f"missing triggers: {watched - seen}"
+
+
 def test_trigger_variables_cover_the_template_triggers(blueprint):
     """Template triggers may only read ``trigger_variables``, never ``variables``."""
     declared = set(blueprint.trigger_variables)

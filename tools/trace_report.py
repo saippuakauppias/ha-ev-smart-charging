@@ -37,8 +37,14 @@ INTERESTING = [
     "actual_current",
     "soc",
     "charger_status",
+    "charger_online",
     "car_home",
     "physically_present",
+    # Владение сессией: во вторую реальную ночь блюпринт семь часов считал
+    # собственную зарядку чужой, и по остальным полям это было незаметно —
+    # вердикт «зарядка начата вручную» выглядел законным решением.
+    "session_owned",
+    "foreign_session",
     "alarm_reason",
 ]
 
@@ -180,6 +186,70 @@ def logbook(runs: list[dict[str, Any]], tz: dt.timezone) -> list[tuple[dt.dateti
     return sorted(rows)
 
 
+def anomalies(runs: list[dict[str, Any]], tz: dt.timezone) -> list[str]:
+    """Что стоит заметить в ночи, не вчитываясь во все прогоны.
+
+    Ленту журнала глазами не осилить: за ночь набегает под сотню строк, и
+    решающая деталь в них выглядит как штатная работа. Вторую реальную ночь
+    выдавала одна строка — «зарядка начата вручную» при том, что зарядку
+    начинала сама автоматизация, — и заметить её среди прочих было нечем.
+    """
+    found: list[str] = []
+    offline_since: dt.datetime | None = None
+    foreign_since: dt.datetime | None = None
+    shortfalls: list[float] = []
+
+    for run in runs:
+        moment, values = when(run, tz), variables(run)
+        if moment is None:
+            continue
+
+        # Чужая сессия, длящаяся часами, почти наверняка своя: человек,
+        # включивший зарядку руками, не делает этого каждую ночь подряд.
+        if values.get("foreign_session") is True:
+            foreign_since = foreign_since or moment
+        elif foreign_since is not None:
+            hours = (moment - foreign_since).total_seconds() / 3600
+            if hours >= 1:
+                found.append(
+                    f"{foreign_since:%m-%d %H:%M} — {moment:%H:%M} "
+                    f"({hours:.1f} ч) сессия считалась чужой: ток не регулировался"
+                )
+            foreign_since = None
+
+        if values.get("charger_online") is False:
+            offline_since = offline_since or moment
+        elif offline_since is not None:
+            found.append(f"{offline_since:%m-%d %H:%M:%S} станция теряла связь")
+            offline_since = None
+
+        setpoint, actual = values.get("current_now"), values.get("actual_current")
+        # Нулевой ток при стоящей уставке — это просто выключенная станция,
+        # а не недодача: считать её в среднее значило бы утопить настоящий
+        # разрыв в часах простоя.
+        if (isinstance(setpoint, (int, float)) and isinstance(actual, (int, float))
+                and setpoint > 0 and actual > 0.5):
+            shortfalls.append(setpoint - actual)
+
+    if foreign_since is not None:
+        found.append(
+            f"{foreign_since:%m-%d %H:%M} и до конца выгрузки сессия считалась чужой"
+        )
+    if offline_since is not None:
+        found.append(f"{offline_since:%m-%d %H:%M:%S} станция потеряла связь")
+
+    # Недодача тока: станция систематически отдаёт меньше заказанного, и это
+    # прямо стоит времени зарядки. Компенсируется занижением КПД в настройках.
+    if shortfalls:
+        average = sum(shortfalls) / len(shortfalls)
+        if average > 0.5:
+            found.append(
+                f"станция недодаёт в среднем {average:.2f} А "
+                f"(по {len(shortfalls)} замерам) — стоит занизить КПД в настройках"
+            )
+    return found
+
+
 def offset_hours(value: str) -> float:
     """Часовой пояс как смещение от UTC. Опечатка вроде «33» вместо «3»
     должна давать понятный отказ, а не стек вызовов из недр datetime."""
@@ -259,6 +329,13 @@ def main() -> int:
             print(f"{stamp_of(run, tz)}  {', '.join(sent)}")
     if quiet:
         print("(команд не было)")
+
+    print("\n=== НА ЧТО ОБРАТИТЬ ВНИМАНИЕ ===")
+    notes = anomalies(runs, tz)
+    for line in notes:
+        print(line)
+    if not notes:
+        print("(ничего необычного)")
 
     if args.vars:
         print("\n=== ПЕРЕМЕННЫЕ ===")

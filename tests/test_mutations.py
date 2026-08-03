@@ -201,8 +201,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a charger that never switches on is commanded on every tick",
-        "    {{ not switch_on and switch_gap_elapsed and not needs_write }}",
-        "    {{ not switch_on and not needs_write }}",
+        "    {{ switch_off_confirmed and switch_gap_elapsed and not needs_write }}",
+        "    {{ switch_off_confirmed and not needs_write }}",
     ),
     (
         "a hand-started session has its current overridden",
@@ -224,24 +224,24 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a hand-started session is switched off at the end of the window",
-        "and (charger_fault or not foreign_session)",
+        "and (stop_regardless_of_owner or not foreign_session)",
         "and true",
+    ),
+    (
+        "a lost session flag disables every stop, not just the polite ones",
+        "         stop_regardless_of_owner\n"
+        "         or ((not in_window) and stop_at_window_end)",
+        "         ((not in_window) and stop_at_window_end)",
     ),
     # ---- the actions block, reachable since run_actions() exists ----
     (
         "the charger is switched on before the current is set",
-        "          # 3. включение\n"
         "          - if:\n"
         "              - condition: template\n"
-        '                value_template: "{{ needs_turn_on }}"\n'
-        "            then:\n"
-        "              - action: switch.turn_on",
-        "          # 3. включение\n"
+        '                value_template: "{{ needs_turn_on }}"\n',
         "          - if:\n"
         "              - condition: template\n"
-        '                value_template: "{{ true }}"\n'
-        "            then:\n"
-        "              - action: switch.turn_on",
+        '                value_template: "{{ true }}"\n',
     ),
     (
         "the charger mode is never forced to manual",
@@ -310,8 +310,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "the setpoint and the switch-on go out in the same run",
-        "    {{ not switch_on and switch_gap_elapsed and not needs_write }}",
-        "    {{ not switch_on and switch_gap_elapsed }}",
+        "    {{ switch_off_confirmed and switch_gap_elapsed and not needs_write }}",
+        "    {{ switch_off_confirmed and switch_gap_elapsed }}",
     ),
     (
         "commands are sent to a switch that does not exist",
@@ -320,8 +320,41 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a session flag left raised by a manual stop is never cleared",
-        "    {{ e_session != '' and not switch_on and is_state(e_session, 'on') }}",
+        "    {{ e_session != '' and session_flag_readable and is_state(e_session, 'on')\n"
+        "       and switch_off_confirmed and charger_online and status_known\n"
+        "       and switch_gap_elapsed }}",
         "    {{ false }}",
+    ),
+    (
+        "a blink resets the setpoint of a charging car to the minimum",
+        "              {{ reset_current_on_stop and switch_off_confirmed and charger_online",
+        "              {{ reset_current_on_stop and switch_present and not switch_on",
+    ),
+    (
+        "an unavailable switch counts as a switch that was turned off",
+        "  switch_off_confirmed: \"{{ switch_present and is_state(e_switch, 'off') }}\"",
+        '  switch_off_confirmed: "{{ not switch_on }}"',
+    ),
+    (
+        "a session flag lost mid-charge is never recovered",
+        '                value_template: "{{ session_lost }}"',
+        '                value_template: "{{ false }}"',
+    ),
+    # Mutating the ``session_flag_readable`` term out of ``foreign_session``
+    # would be an equivalent mutation: an unreadable flag already makes
+    # ``session_owned`` true, so both spellings agree on every input. The term
+    # is kept in the blueprint for readability, and the guard is pinned here
+    # instead, where it actually decides something.
+    (
+        "an unreadable session flag makes the session a stranger's",
+        "    {{ e_session == '' or not session_flag_readable or is_state(e_session, 'on') }}",
+        "    {{ e_session == '' or is_state(e_session, 'on') }}",
+    ),
+    (
+        "a problem sensor is trusted while the charger is offline",
+        "       or (e_problem != '' and charger_online and status_known\n"
+        "           and has_value(e_problem) and is_state(e_problem, 'on')) }}",
+        "       or (e_problem != '' and is_state(e_problem, 'on')) }}",
     ),
     (
         "an emergency top-up runs on through the day once it has recovered",

@@ -245,3 +245,70 @@ def test_the_report_survives_an_ascii_locale(tmp_path):
     assert result.returncode == 0, result.stderr
     assert "Прогонов: 1" in result.stdout
     assert "запускаем зарядку" in result.stdout
+
+
+# ------------------------------------------------------------- anomalies
+
+
+def a_run(when_utc: str, **values):
+    """A trace carrying variables, which is what the anomaly pass reads."""
+    return a_trace(
+        start=when_utc,
+        steps={"action/0": [{"changed_variables": values}]},
+    )
+
+
+def test_a_session_counted_as_foreign_for_hours_is_flagged(tmp_path):
+    """The second real night in one line.
+
+    Nothing else in the report showed it: "зарядка начата вручную" is a
+    perfectly ordinary verdict, repeated among ninety other lines, and the
+    reader has no way to know the automation had started that charge itself.
+    """
+    write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00", foreign_session=True))
+    write(tmp_path, "b.json", a_run("2026-08-03T02:30:00+00:00", foreign_session=True))
+    write(tmp_path, "c.json", a_run("2026-08-03T04:00:00+00:00", foreign_session=False))
+    out = run(tmp_path).stdout
+    assert "сессия считалась чужой" in out
+    assert "(6.5 ч)" in out
+
+
+def test_a_brief_foreign_session_is_not_worth_mentioning(tmp_path):
+    """Somebody really did start a charge by hand for twenty minutes."""
+    write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00", foreign_session=True))
+    write(tmp_path, "b.json", a_run("2026-08-02T21:50:00+00:00", foreign_session=False))
+    assert "сессия считалась чужой" not in run(tmp_path).stdout
+
+
+def test_a_foreign_session_still_running_at_the_end_is_flagged(tmp_path):
+    """The traces stop where the download stopped, not where the night did."""
+    write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00", foreign_session=True))
+    assert "и до конца выгрузки" in run(tmp_path).stdout
+
+
+def test_the_current_shortfall_is_averaged_and_reported(tmp_path):
+    """Both real nights ran about 1.3 A below the setpoint, every single pass."""
+    write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00",
+                                    current_now=16, actual_current=14.7))
+    write(tmp_path, "b.json", a_run("2026-08-02T22:30:00+00:00",
+                                    current_now=19, actual_current=17.7))
+    out = run(tmp_path).stdout
+    assert "недодаёт в среднем 1.30 А" in out
+
+
+def test_a_station_that_delivers_what_was_asked_is_not_flagged(tmp_path):
+    write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00",
+                                    current_now=16, actual_current=15.9))
+    assert "недодаёт" not in run(tmp_path).stdout
+
+
+def test_an_idle_charger_does_not_count_as_underdelivering(tmp_path):
+    """Zero current at a standing setpoint is a charger that is simply off."""
+    write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00",
+                                    current_now=16, actual_current=0))
+    assert "недодаёт" not in run(tmp_path).stdout
+
+
+def test_a_quiet_night_says_so(tmp_path):
+    write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00", foreign_session=False))
+    assert "(ничего необычного)" in run(tmp_path).stdout
