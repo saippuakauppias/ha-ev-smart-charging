@@ -40,7 +40,7 @@ diag:
 ```yaml
 trace:
   stored_traces: 100
-alias: Ночная зарядка EV
+alias: Нежная зарядка EV
 use_blueprint:
   path: ev_smart_charging/ev_smart_charging.yaml
   input:

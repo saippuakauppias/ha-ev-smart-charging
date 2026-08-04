@@ -7,7 +7,7 @@
 [![Docs](https://github.com/saippuakauppias/ha-ev-smart-charging/actions/workflows/docs.yml/badge.svg)](https://saippuakauppias.github.io/ha-ev-smart-charging/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-Блюпринт автоматизации, который заряжает электромобиль или PHEV в заданном ночном
+Блюпринт автоматизации, который нежно заряжает электромобиль или PHEV в заданном
 окне и **динамически подбирает ток**, чтобы зарядка равномерно растянулась до
 времени окончания, а не «выстреливала» максимумом в первый час и потом стояла.
 
