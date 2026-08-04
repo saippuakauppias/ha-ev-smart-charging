@@ -1,6 +1,6 @@
 pytest>=8.0
 pytest-xdist>=3.5
 PyYAML>=6.0
-Jinja2>=3.1
+Jinja2>=3.1.6
 yamllint>=1.35
 ruff>=0.6,<0.17
