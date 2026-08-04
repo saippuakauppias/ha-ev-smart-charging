@@ -52,7 +52,7 @@
 
 ```bash
 pytest -m "not slow"
-pytest -m slow
+pytest -m slow -n auto
 ruff check tests/ tools/
 yamllint -c .yamllint.yaml blueprints/ .github/ .yamllint.yaml
 ```

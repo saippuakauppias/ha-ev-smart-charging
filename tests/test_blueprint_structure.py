@@ -118,6 +118,8 @@ def test_expected_triggers_are_present(blueprint):
         "tick",
         "charger_status",
         "current_written",
+        "command_missed",
+        "setpoint_stale",
         "ha_start",
         "car_arrived",
         "target_hit",
@@ -137,7 +139,7 @@ def test_charger_state_triggers_ignore_entities_going_unavailable(blueprint):
     one moment the automation learns the station returned, so ``not_from``
     would throw away the signal along with the noise.
     """
-    watched = {"charger_status", "current_written"}
+    watched = {"charger_status", "current_written", "setpoint_stale"}
     seen = set()
     for trigger in blueprint.triggers:
         if trigger.get("id") not in watched:
@@ -271,7 +273,9 @@ EXPECTED_DEFAULTS = {
     "efficiency": 88,
     "emergency_hysteresis": 10,
     "emergency_soc": 0,
+    "current_headroom": 10,
     "fallback_current": 10,
+    "gentle_finish_soc": 95,
     "home_zone": "zone.home",
     "max_current": 28,
     "min_current": 6,
@@ -317,3 +321,5 @@ def test_the_defaults_are_internally_consistent(blueprint):
     assert 0 < d["efficiency"] <= 100
     assert 0 < d["target_soc"] <= 100
     assert d["start_time"] != d["stop_time"]
+    assert 0 <= d["current_headroom"] <= 30
+    assert 50 <= d["gentle_finish_soc"] <= 100

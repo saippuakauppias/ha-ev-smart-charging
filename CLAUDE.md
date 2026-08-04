@@ -23,7 +23,7 @@
 
 ```bash
 pytest -m "not slow"     # ~20 с, обычная проверка
-pytest -m slow           # мутации, ~30 мин, перед крупными правками
+pytest -m slow -n auto   # мутации, несколько минут, перед крупными правками
 ruff check tests/ tools/
 yamllint -c .yamllint.yaml blueprints/ .github/ .yamllint.yaml mkdocs.yml
 mkdocs build --strict    # сайт; битая ссылка = падение сборки

@@ -58,6 +58,14 @@ FULL_INPUTS: dict[str, Any] = {
     "max_current": 28,
     "nominal_voltage": 230,
     "target_soc": 100,
+    # Both of these are deliberately switched off in the shared baseline so the
+    # existing suite keeps measuring the plain regulator. The headroom multiplies
+    # every computed current, and the gentle finish caps it near the target —
+    # left at their shipped defaults they would shift the arithmetic under every
+    # test that asserts a specific ampere value, hiding real regressions behind
+    # a constant. Tests that exercise the features turn them on explicitly.
+    "current_headroom": 0,
+    "gentle_finish_soc": 100,
 }
 
 

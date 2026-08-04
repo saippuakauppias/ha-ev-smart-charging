@@ -64,6 +64,10 @@ NIGHT_INPUTS = {
     "current_step": 1,
     "phases": "1",
     "efficiency": 88,
+    # Off, like the second-night replay: these traces predate both knobs, and
+    # this file exists to reproduce the night exactly as it ran.
+    "current_headroom": 0,
+    "gentle_finish_soc": 100,
     "time_reserve_minutes": 30,
     "command_gap": 60,
 }

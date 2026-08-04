@@ -72,8 +72,12 @@ jobs:
 
       # Corrupts one part of the blueprint at a time and asserts the suite
       # notices. A green suite that survives a mutation is a vacuous suite.
+      #
+      # One full suite run per mutation, so this is the long job: serial it is
+      # about half an hour. The mutations are independent and each xdist worker
+      # gets its own sandbox copy, so `-n auto` parallelises them safely.
       - name: Verify the suite detects a broken blueprint
-        run: pytest -v -m slow
+        run: pytest -v -m slow -n auto
 
   ruff:
     name: Python lint

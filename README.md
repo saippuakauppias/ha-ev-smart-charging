@@ -85,7 +85,7 @@ Home Assistant:
 ```bash
 pip install -r requirements-dev.txt
 pytest -m "not slow"    # весь набор кроме мутаций, около 15 секунд
-pytest -m slow          # мутационное тестирование, около 10 минут
+pytest -m slow -n auto  # мутационное тестирование, несколько минут
 ```
 
 Подробнее — [про устройство тестов](https://saippuakauppias.github.io/ha-ev-smart-charging/development/)

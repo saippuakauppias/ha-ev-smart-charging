@@ -75,6 +75,10 @@ NIGHT_INPUTS = {
     "current_step": 1,
     "phases": "1",
     "efficiency": 88,
+    # The traces replayed here were recorded before either knob existed, so both
+    # stay off: this file must keep reproducing the night as it actually ran.
+    "current_headroom": 0,
+    "gentle_finish_soc": 100,
     "time_reserve_minutes": 15,
     "command_gap": 60,
 }
@@ -305,21 +309,45 @@ def test_the_window_end_stops_the_session_once_the_flag_is_back(blueprint):
 # ------------------------------------------------- the current that never arrived
 
 
-def test_the_shortfall_between_setpoint_and_reality_is_measured(during_dropout):
+def test_the_shortfall_between_setpoint_and_reality_is_measured(replay):
     """Both real nights ran about 1.3 A below whatever was asked for: 16 A gave
     14.7, 19 A gave 17.7. That is the station's own offset, not cable loss and
     not the car's limit, and it costs roughly eight percent of the plan.
 
-    It is reported rather than corrected. Adding it back to the calculated
-    current would feed straight into the deadband comparison and rewrite the
-    setpoint on every single pass — the exact confusion
-    ``test_the_deadband_compares_setpoint_with_setpoint`` exists to prevent.
+    It is reported rather than corrected here. Compensation exists, but as a
+    multiplier applied before rounding (see ``current_headroom``); adding the
+    measured gap back to the calculated current would instead feed straight into
+    the deadband comparison and rewrite the setpoint on every single pass — the
+    exact confusion ``test_the_deadband_compares_setpoint_with_setpoint``
+    exists to prevent.
+
+    Measured only once the setpoint has settled: see the companion test below.
     """
-    ctx = during_dropout(TICKS["T+1.9"])
+    now, world = dropout_world(TICKS["T+1.9"])
+    settled = now - dt.timedelta(minutes=30)
+    world[NUMBER] = State(16, {"min": 6.0, "max": 32.0, "step": 1.0}, settled)
+    world[AMPERE] = State(14.715, last_changed=settled)
+    ctx = replay(now, world)
     assert ctx["current_now"] == 16
     assert ctx["actual_current"] == 14.715
     assert ctx["current_shortfall"] == 1.29
     assert ctx["desired_current"] == 15, "the plan itself stays untouched"
+
+
+def test_no_shortfall_is_claimed_while_the_setpoint_is_still_fresh(during_dropout):
+    """The station's current sensor lags behind its own setpoint.
+
+    On the third night it sat at 11.669 A for seven minutes while the power
+    reading climbed 2592 -> 5683 W, so the real current was closer to 25 A. Read
+    naively, that gap looks like a 16 A shortfall — every one of those bogus
+    readings landed on a setpoint exactly ``command_gap`` old, while every
+    trustworthy one sat on a setpoint thousands of seconds old.
+    """
+    ctx = during_dropout(TICKS["T+1.9"])
+    assert ctx["current_now"] == 16
+    assert ctx["actual_current"] == 14.715
+    assert ctx["gap_elapsed"] is False, "the setpoint came back one second ago"
+    assert ctx["current_shortfall"] == 0
 
 
 def test_no_shortfall_is_claimed_when_nothing_is_flowing(during_dropout):

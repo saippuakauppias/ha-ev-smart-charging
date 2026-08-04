@@ -121,8 +121,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     # ---- behaviour added or repaired in 1.1.0 ----
     (
         "the charge budget ignores the number of phases",
-        "{{ (watts / ([voltage * phases_n, 1] | max)) | round(3) }}",
-        "{{ (watts / ([voltage, 1] | max)) | round(3) }}",
+        "{% set raw = watts / ([voltage * phases_n, 1] | max) %}",
+        "{% set raw = watts / ([voltage, 1] | max) %}",
     ),
     (
         "charging efficiency is ignored when sizing the budget",
@@ -378,6 +378,54 @@ MUTATIONS: list[tuple[str, str, str]] = [
         "    {% elif not status_known %}status_unknown\n",
         "",
     ),
+    # ---- behaviour added or repaired in 1.4.0 ----
+    (
+        "a swallowed turn-on is never retried before the next recalculation",
+        '  - trigger: state\n'
+        '    entity_id: !input charger_switch\n'
+        '    to: "off"\n'
+        "    for:\n"
+        "      seconds: !input command_gap\n"
+        "    id: command_missed\n",
+        "",
+    ),
+    (
+        "a swallowed setpoint write is never retried",
+        "  - trigger: state\n"
+        "    entity_id: !input charger_current_number\n"
+        '    not_to: ["unknown", "unavailable"]\n'
+        "    for:\n"
+        '      seconds: "{{ (command_gap | int(60)) * 2 }}"\n'
+        "    id: setpoint_stale\n",
+        "",
+    ),
+    (
+        "the planned current carries no headroom over what it computed",
+        "      {{ (raw * (1 + [headroom_pct | float(0), 0] | max / 100)) | round(3) }}",
+        "      {{ raw | round(3) }}",
+    ),
+    (
+        "the gentle finish also blocks lowering the current",
+        "      {{ [bounded, current_now | float(0)] | min | round(2) }}",
+        "      {{ current_now | float(0) | round(2) }}",
+    ),
+    (
+        "the gentle finish holds the current down during an emergency top-up",
+        "    {{ gentle_finish_soc | float(100) < 100\n"
+        "       and not emergency and not cold_mode",
+        "    {{ gentle_finish_soc | float(100) < 100",
+    ),
+    (
+        "a dropout counts as proof the car is no longer plugged in",
+        "  physically_present: >-\n    {% if switch_off_confirmed %}",
+        "  physically_present: >-\n    {% if not switch_on %}",
+    ),
+    (
+        "the shortfall is measured while the setpoint is still settling",
+        "          or current_now | float(0) <= 0 or actual_current | float(0) <= 0.5\n"
+        "          or not gap_elapsed %}",
+        "          or current_now | float(0) <= 0 or actual_current | float(0) <= 0.5 %}",
+    ),
     (
         "the snapshot claims commands that no branch can send",
         "        'записать_ток': needs_write and should_charge,",
@@ -412,10 +460,17 @@ def sandbox(tmp_path_factory) -> Path:
 
 
 def _run_suite(sandbox: Path) -> int:
-    """Run the suite inside the sandbox, excluding this file, and count failures."""
+    """Run the suite inside the sandbox, excluding this file, and count failures.
+
+    Deliberately single-process. The outer job is already parallel (one worker
+    per mutation), so spawning workers here too would oversubscribe the machine
+    and make each inner run slower, not faster. ``-x`` is the real saving: we
+    only need to know *whether* the suite noticed, and a caught mutation usually
+    fails within the first seconds instead of grinding through all 700 tests.
+    """
     result = subprocess.run(
         [
-            sys.executable, "-m", "pytest", "-q",
+            sys.executable, "-m", "pytest", "-q", "-x",
             "-p", "no:cacheprovider",
             "--deselect", "tests/test_mutations.py",
             "tests/",
