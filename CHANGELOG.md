@@ -582,9 +582,9 @@
   только когда максимум не делится на дискретность (например 28 А при шаге 5 А).
   Обнаружено мутационным тестированием.
 
-[1.4.0]: https://github.com/saippuakauppias/ha-ev-smart-charging/compare/v1.3.0...v1.4.0
-[1.3.0]: https://github.com/saippuakauppias/ha-ev-smart-charging/compare/v1.2.1...v1.3.0
-[1.2.1]: https://github.com/saippuakauppias/ha-ev-smart-charging/compare/v1.2.0...v1.2.1
-[1.2.0]: https://github.com/saippuakauppias/ha-ev-smart-charging/compare/v1.1.0...v1.2.0
-[1.1.0]: https://github.com/saippuakauppias/ha-ev-smart-charging/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/saippuakauppias/ha-ev-smart-charging/releases/tag/v1.0.0
+[1.4.0]: https://github.com/saippuakauppias/ha-ev-smart-charging/compare/1.3.0...1.4.0
+[1.3.0]: https://github.com/saippuakauppias/ha-ev-smart-charging/compare/1.2.1...1.3.0
+[1.2.1]: https://github.com/saippuakauppias/ha-ev-smart-charging/compare/1.2.0...1.2.1
+[1.2.0]: https://github.com/saippuakauppias/ha-ev-smart-charging/compare/1.1.0...1.2.0
+[1.1.0]: https://github.com/saippuakauppias/ha-ev-smart-charging/compare/1.0.0...1.1.0
+[1.0.0]: https://github.com/saippuakauppias/ha-ev-smart-charging/releases/tag/1.0.0
