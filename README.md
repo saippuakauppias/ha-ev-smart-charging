@@ -20,8 +20,8 @@
 
 ```
 23:00  ─────────────────────────────────────────────────────────  07:00
-       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓  28 A   ← «зарядить как можно быстрее»
-       ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  14 A   ← этот блюпринт
+       ▓▓▓▓▓▓▓▓▓▓▓▓▓▓  28 A   ← «зарядить как можно быстрее»
+       ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░  12 A   ← этот блюпринт
 ```
 
 ## 📖 Документация
@@ -29,18 +29,18 @@
 **<https://saippuakauppias.github.io/ha-ev-smart-charging/>**
 
 Там подробно: как работает регулятор, все параметры, поведение при сбоях,
-диагностика ночи и разбор трассировок.
+диагностика сессии и разбор трассировок.
 
 | Раздел | О чём |
 |---|---|
 | [Что умеет](https://saippuakauppias.github.io/ha-ev-smart-charging/guide/features/) | Полный перечень возможностей |
 | [Как работает регулятор](https://saippuakauppias.github.io/ha-ev-smart-charging/guide/how-it-works/) | Формула, обратная связь, источники плана |
-| [Быстрый старт](https://saippuakauppias.github.io/ha-ev-smart-charging/getting-started/quick-start/) | Три обязательных поля и что сделать до первой ночи |
+| [Быстрый старт](https://saippuakauppias.github.io/ha-ev-smart-charging/getting-started/quick-start/) | Три обязательных поля и что сделать до первого запуска |
 | [Настройка](https://saippuakauppias.github.io/ha-ev-smart-charging/guide/settings/) | Ток и электрика, окно, троттлинг команд |
 | [Отказоустойчивость](https://saippuakauppias.github.io/ha-ev-smart-charging/guide/reliability/) | Сбои данных, вранья GPS и связи со станцией |
 | [Уведомления](https://saippuakauppias.github.io/ha-ev-smart-charging/guide/notifications/) | Три хука, все причины остановки и тревоги |
 | [Примеры настройки](https://saippuakauppias.github.io/ha-ev-smart-charging/getting-started/examples/) | Типовые конфигурации и готовые уведомления |
-| [Диагностика](https://saippuakauppias.github.io/ha-ev-smart-charging/diagnostics/) | Вердикт, журнал, трассировки, сводка по ночи |
+| [Диагностика](https://saippuakauppias.github.io/ha-ev-smart-charging/diagnostics/) | Вердикт, журнал, трассировки, сводка по сессии |
 | [Идеи на будущее](https://saippuakauppias.github.io/ha-ev-smart-charging/ideas/) | Обдуманное, но намеренно не реализованное |
 
 ## Установка
@@ -72,10 +72,10 @@ https://raw.githubusercontent.com/saippuakauppias/ha-ev-smart-charging/refs/head
 с целью в кВт·ч.
 
 > [!IMPORTANT]
-> Перед первой ночью включите параметр «Записывать ход зарядки в журнал»
-> и поднимите лимит трассировок до `stored_traces: 100` — по умолчанию Home
-> Assistant хранит всего 5, и к утру от ночной зарядки не остаётся ничего.
-> [Как это сделать](https://saippuakauppias.github.io/ha-ev-smart-charging/diagnostics/traces/#сразу-поднимите-лимит-трассировок).
+> Перед первым запуском включите запись хода зарядки в журнал и поднимите
+> лимит трассировок: по умолчанию Home Assistant хранит их так мало, что
+> к концу сессии от неё не остаётся ничего, и разбирать случившееся нечем.
+> [Что именно сделать](https://saippuakauppias.github.io/ha-ev-smart-charging/diagnostics/traces/#сразу-поднимите-лимит-трассировок).
 
 ## Разработка
 

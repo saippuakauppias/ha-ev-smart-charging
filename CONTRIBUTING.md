@@ -64,6 +64,17 @@ yamllint -c .yamllint.yaml blueprints/ .github/ .yamllint.yaml
 pip install homeassistant && python tests/validate_with_home_assistant.py
 ```
 
+Если правили `tests/ha_sim.py` — прогоните сверку движка с настоящим Home
+Assistant. Набор целиком работает на этом эмуляторе и потому не может заметить,
+что тот разошёлся с оригиналом:
+
+```bash
+pip install homeassistant && python tests/differential_against_home_assistant.py
+```
+
+Добавили в движок новую функцию — добавьте её вызовы и в список шаблонов
+этого скрипта, иначе у новой реализации не будет эталона.
+
 Если правили `tools/trace_report.py` — он намеренно держит совместимость
 с Python 3.9 и не требует ни одного стороннего пакета. Люди запускают его
 системным интерпретатором, чтобы приложить вывод к баг-репорту, и просить их

@@ -194,7 +194,7 @@ jobs:
           PY
 
   home-assistant-schema:
-    name: Home Assistant schema (informational)
+    name: Home Assistant checks (informational)
     runs-on: ubuntu-latest
     # Home Assistant's internal APIs carry no stability promise, so a failure
     # here is a signal to investigate rather than a reason to block a merge.
@@ -217,6 +217,21 @@ jobs:
           python tests/validate_with_home_assistant.py || status=$?
           if [ "$status" -eq 77 ]; then
             echo "::notice::schema check skipped"
+            exit 0
+          fi
+          exit "$status"
+
+      # The whole test suite runs on a reimplementation of the template engine,
+      # so the suite cannot notice when that reimplementation drifts. This is
+      # the only check that compares it against the real thing. The dangerous
+      # direction is one-sided: an emulator softer than Home Assistant keeps the
+      # suite green while the blueprint breaks at night.
+      - name: ha_sim renders the same as Home Assistant
+        run: |
+          status=0
+          python tests/differential_against_home_assistant.py || status=$?
+          if [ "$status" -eq 77 ]; then
+            echo "::notice::differential check skipped"
             exit 0
           fi
           exit "$status"
