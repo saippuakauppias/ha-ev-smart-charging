@@ -119,7 +119,6 @@ def test_expected_triggers_are_present(blueprint):
         "charger_status",
         "current_written",
         "command_missed",
-        "setpoint_stale",
         "ha_start",
         "car_arrived",
         "target_hit",
@@ -139,7 +138,7 @@ def test_charger_state_triggers_ignore_entities_going_unavailable(blueprint):
     one moment the automation learns the station returned, so ``not_from``
     would throw away the signal along with the noise.
     """
-    watched = {"charger_status", "current_written", "setpoint_stale"}
+    watched = {"charger_status", "current_written"}
     seen = set()
     for trigger in blueprint.triggers:
         if trigger.get("id") not in watched:

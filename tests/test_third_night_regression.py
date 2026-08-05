@@ -168,14 +168,18 @@ def test_the_retry_trigger_watches_the_switch_staying_off(blueprint):
     assert "not_from" not in missed, "coming back from unavailable must still fire"
 
 
-def test_the_stale_setpoint_trigger_waits_longer_than_a_normal_write(blueprint):
-    """A healthy write leaves the setpoint untouched for exactly ``command_gap``
-    seconds, which is what ``current_written`` already keys off. Firing on the
-    same interval would make every normal write look like a failure."""
+def test_one_trigger_covers_both_the_queue_and_the_swallowed_write(blueprint):
+    """A setpoint that has not moved for ``command_gap`` means one of two things,
+    and a single trigger serves both: either the station accepted the write and
+    the queued turn-on may follow, or the write was swallowed and must be
+    repeated. The fourth night proved the separate ``setpoint_stale`` trigger
+    redundant — it never fired once, because this one always got there first.
+    """
     triggers = {t.get("id"): t for t in blueprint.triggers}
-    stale = triggers["setpoint_stale"]
-    assert stale["for"] != {"seconds": InputRef("command_gap")}
-    assert "* 2" in str(stale["for"]["seconds"]), "twice the command gap"
+    assert "setpoint_stale" not in triggers, "the second trigger was redundant"
+    written = triggers["current_written"]
+    assert written["for"] == {"seconds": InputRef("command_gap")}
+    assert written["not_to"] == ["unknown", "unavailable"]
 
 
 def test_a_charger_that_is_simply_off_is_not_hammered(replay_actions):

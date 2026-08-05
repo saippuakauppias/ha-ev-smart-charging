@@ -184,8 +184,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a session meter is rejected whenever it overshoots a small target",
-        "and states(e_energy) | float(0) <= energy_sane_max | float(100) }}",
-        "and states(e_energy) | float(0) <= energy_target | float(0) * 3 }}",
+        "and states(e_energy) | float(0) <= energy_sane_max | float(100)",
+        "and states(e_energy) | float(0) <= energy_target | float(0) * 3",
     ),
     (
         "finishing off after the window hammers the daytime tariff",
@@ -395,9 +395,32 @@ MUTATIONS: list[tuple[str, str, str]] = [
         "    entity_id: !input charger_current_number\n"
         '    not_to: ["unknown", "unavailable"]\n'
         "    for:\n"
-        '      seconds: "{{ (command_gap | int(60)) * 2 }}"\n'
-        "    id: setpoint_stale\n",
+        "      seconds: !input command_gap\n"
+        "    id: current_written\n",
         "",
+    ),
+    # ---- behaviour added or repaired in 1.4.1 ----
+    (
+        "a rise is written even when the charge percentage is stale",
+        "       and (not current_rising or not switch_on or soc_fresh_enough_to_rise)\n",
+        "",
+    ),
+    (
+        "the staleness guard also blocks lowering the current",
+        "       and (not current_rising or not switch_on or soc_fresh_enough_to_rise)\n",
+        "       and soc_fresh_enough_to_rise\n",
+    ),
+    (
+        "a cumulative meter passes once its counter has been reset",
+        "    {{ switch_off_confirmed and charger_online and not charging_now\n"
+        "       and states(e_energy) | float(0) > "
+        "[effective_capacity | float(50) * 0.1, 2] | max }}",
+        "    {{ false }}",
+    ),
+    (
+        "the arrival trigger fires on every coordinate update",
+        "  - trigger: template\n    id: car_arrived\n    for:\n      seconds: 30\n",
+        "  - trigger: template\n    id: car_arrived\n",
     ),
     (
         "the planned current carries no headroom over what it computed",
