@@ -49,7 +49,7 @@ blueprint:
     предыдущего изменения. Многие станции плохо переносят частые команды.
 
 
-    Версия 1.4.1
+    Версия 1.4.2
 
   domain: automation
   source_url: https://raw.githubusercontent.com/saippuakauppias/ha-ev-smart-charging/refs/heads/main/blueprints/automation/ev_smart_charging/ev_smart_charging.yaml
@@ -1415,14 +1415,20 @@ variables:
   #
   # Недоступная мощность при недоступном выключателе означает «не знаем»,
   # и ответ «не знаем» здесь — не повод для разрушительного вывода.
-  physically_present: >-
-    {% if switch_off_confirmed %}
-      {{ false }}
-    {% elif e_power != '' and has_value(e_power) %}
+  # Идёт ли ток прямо сейчас: по сенсору мощности, а без него — по статусу
+  # станции. Мера одна на весь блюпринт и объявлена здесь, выше первого
+  # потребителя. Пока копий этого выражения было две, правка одной из них
+  # разъехалась бы со второй, а от этой величины зависят сразу и вывод
+  # «машина уехала», и детектор замороженных данных о заряде.
+  charging_now: >-
+    {% if e_power != '' and has_value(e_power) %}
       {{ states(e_power) | float(0) > no_power_threshold | float(200) }}
     {% else %}
       {{ status_norm in list_charging }}
     {% endif %}
+  # То же самое, но с одной оговоркой: подтверждённо выключенная станция тока
+  # не отдаёт, что бы ни говорил залипший статус.
+  physically_present: "{{ charging_now and not switch_off_confirmed }}"
   # Начать сессию можно только при известном местоположении, продолжить —
   # если трекер замолчал ИЛИ если ток реально идёт: и «GPS потерялся», и
   # «GPS соврал» — это не «машина уехала».
@@ -1456,12 +1462,7 @@ variables:
     {% endif %}
 
   # Шаг 3 — процент не «замёрз» при реально идущем токе?
-  charging_now: >-
-    {% if e_power != '' and has_value(e_power) %}
-      {{ states(e_power) | float(0) > no_power_threshold | float(200) }}
-    {% else %}
-      {{ status_norm in list_charging }}
-    {% endif %}
+  # Сам признак «ток идёт» — charging_now, объявлен выше, в разделе про место.
   soc_age_min: >-
     {% set o = states[e_battery] if e_battery != '' else none %}
     {{ 0 if o is none else ((now() - o.last_changed).total_seconds() / 60) | round(1) }}
@@ -1496,20 +1497,13 @@ variables:
   # молча не дозаряжалась. Долю распознаём по величине и переводим в проценты;
   # всё остальное вне диапазона считаем ошибкой сенсора и берём 100,
   # а не подтягиваем к границе — зажим здесь маскировал бы неверные данные.
-  soh_raw: >-
-    {% if e_soh != '' and has_value(e_soh) and is_number(states(e_soh)) %}
-      {{ states(e_soh) | float(-1) }}
-    {% else %}
-      {{ -1 }}
-    {% endif %}
-  soh_scaled: >-
-    {{ (soh_raw | float(-1) * 100) if 0 < soh_raw | float(-1) < 2
-       else soh_raw | float(-1) }}
   soh_pct: >-
-    {% if 50 <= soh_scaled | float(-1) <= 130 %}
-      {{ soh_scaled | float(100) }}
-    {% else %}
+    {% if e_soh == '' or not has_value(e_soh) or not is_number(states(e_soh)) %}
       {{ 100 }}
+    {% else %}
+      {% set v = states(e_soh) | float(-1) %}
+      {% set scaled = (v * 100) if 0 < v < 2 else v %}
+      {{ scaled if 50 <= scaled <= 130 else 100 }}
     {% endif %}
   effective_capacity: "{{ ((capacity_kwh | float(50)) * (soh_pct | float(100)) / 100) | round(3) }}"
 
@@ -1974,13 +1968,26 @@ variables:
   soc_fresh_enough_to_rise: >-
     {{ plan_source != 'soc'
        or soc_age_min | float(0) * 60 <= current_age | float(999999) }}
+  # Скобки здесь обязательны, и это не косметика.
+  #
+  # `and` в Jinja связывает крепче `or`, поэтому без внешних скобок исключение
+  # для потолка становилось самостоятельным условием и обходило проверку
+  # свежести процента. В третью ночь это видно построчно: лестница
+  # 16 → 20 → 23 → 27 → 28 А за три с половиной минуты, каждый шаг разбужен
+  # собственной предыдущей записью, процент всё это время стоял на 99.
+  # Защита гасила только первые два шага — как раз пока расчёт не дорос
+  # до потолка; дальше 23 → 28 А проходили через исключение для границы.
+  #
+  # Теперь свежесть проверяется для любого подъёма, включая выход на потолок.
+  # Снижение исключение по-прежнему не трогает: там оно и нужно (станция
+  # рапортует 27.9 вместо 28, и без него уставка вечно считалась бы неверной).
   want_write: >-
-    {{ (desired_current - current_now) | abs
-         > (rise_tolerance | float(0.5)
-            if (current_rising or not switch_on)
-            else [deadband | float(2), rise_tolerance | float(0.5)] | max)
-       and (not current_rising or not switch_on or soc_fresh_enough_to_rise)
-       or (at_boundary and setpoint_differs) }}
+    {{ ((desired_current - current_now) | abs
+          > (rise_tolerance | float(0.5)
+             if (current_rising or not switch_on)
+             else [deadband | float(2), rise_tolerance | float(0.5)] | max)
+        or (at_boundary and setpoint_differs))
+       and (not current_rising or not switch_on or soc_fresh_enough_to_rise) }}
 
   # Свою потерянную сессию от чужой отличает уставка, а не время.
   #

@@ -71,6 +71,22 @@ def test_no_top_level_shape_crashes_the_loader(tmp_path, payload):
     assert trace_report.load(tmp_path) == []
 
 
+@pytest.mark.parametrize("inner", ["a string", 5, [1, 2], None, True])
+def test_a_trace_body_of_the_wrong_type_is_skipped(tmp_path, inner):
+    """The nested ``trace`` key was checked for presence but not for type.
+
+    A stray file carrying the right key over the wrong value crashed while the
+    steps were being walked - that is, after the report had already started
+    printing, which is exactly the half-written output this module exists to
+    avoid. The valid trace beside it must still come through.
+    """
+    write(tmp_path, "stray.json", {"trace": {"trace": inner}})
+    write(tmp_path, "good.json", a_trace())
+    runs = trace_report.load(tmp_path)
+    assert [r["file"] for r in runs] == ["good.json"]
+    assert trace_report.commands(runs[0]) is not None
+
+
 def test_logbook_entries_of_the_wrong_type_are_ignored(tmp_path):
     """``logbookEntries`` as a dict used to crash mid-report, after the header
     had already been printed."""

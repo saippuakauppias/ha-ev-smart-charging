@@ -33,7 +33,7 @@ body:
 
 
         Подробности — в разделе
-        [Диагностика](https://github.com/saippuakauppias/ha-ev-smart-charging#лимит-трассировок).
+        [Диагностика](https://saippuakauppias.github.io/ha-ev-smart-charging/diagnostics/traces/#сразу-поднимите-лимит-трассировок).
 
 
         Если проблема повторяется, дождитесь следующей ночи с включёнными
@@ -71,7 +71,7 @@ body:
     attributes:
       label: Версия блюпринта
       description: Указана в конце описания блюпринта.
-      placeholder: "1.3.0"
+      placeholder: "1.4.1"
     validations:
       required: true
 

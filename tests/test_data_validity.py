@@ -139,6 +139,31 @@ def test_no_power_means_no_freeze_verdict(evaluate):
     assert ctx["soc_frozen"] is False
 
 
+@pytest.mark.parametrize(
+    ("watts", "flowing"), [(0, False), (150, False), (199, False), (250, True)]
+)
+def test_standby_draw_is_not_mistaken_for_charging(evaluate, watts, flowing):
+    """The threshold exists because an idle station is not a silent one.
+
+    Electronics, a display and a contactor coil draw tens of watts with no car
+    charging at all. Comparing against zero would read that as current flowing,
+    which in turn feeds "the car is physically here" and the frozen-data
+    detector — both of which then answer confidently on the strength of a
+    standby light.
+    """
+    now = moment(1, 0)
+    ctx = evaluate(
+        now,
+        inputs={"no_power_threshold": 200},
+        **{
+            POWER: watts,
+            STATUS: "paused",
+            "switch.charger": charging_since(now),
+        },
+    )
+    assert ctx["charging_now"] is flowing
+
+
 def test_freeze_detection_falls_back_to_the_status_sensor(evaluate):
     """Without a power sensor the charger status still tells us current is flowing."""
     now = moment(1, 0)
@@ -503,3 +528,26 @@ def test_an_energy_plan_within_a_whisker_of_its_target_also_stays_numeric(evalua
     )
     assert ctx["plan_source"] == "energy"
     assert isinstance(ctx["needed_kwh"], (int, float))
+
+
+def test_a_small_battery_does_not_make_its_own_meter_implausible(evaluate):
+    """The floor under the sanity ceiling is what keeps PHEVs working.
+
+    The ceiling is twice the usable capacity, which on a 9 kWh plug-in hybrid
+    would be 18 kWh — and a perfectly honest session meter passes that on a
+    single evening, because a PHEV is routinely charged from empty more than
+    once. Rejecting the meter would silently drop the energy plan for exactly
+    the cars the blueprint claims to support in its opening sentence.
+    """
+    ctx = evaluate(
+        moment(3, 0),
+        inputs={
+            "session_energy_sensor": ENERGY,
+            "session_energy_target": 9,
+            "battery_capacity": 9,
+        },
+        **{SOC: State("unavailable"), ENERGY: 15.0},
+    )
+    assert ctx["energy_sane_max"] >= 20, "the floor, not twice the capacity"
+    assert ctx["energy_valid"] is True
+    assert ctx["plan_source"] == "energy"

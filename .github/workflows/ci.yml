@@ -4,6 +4,10 @@ name: CI
 on:
   push:
     branches: [main]
+    # Теги нужны здесь ради джобы packaging: без них сверка тега с версией
+    # блюпринта не выполнялась никогда — push тега не подходит под фильтр
+    # branches, и github.ref_type всегда был `branch`.
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
   workflow_dispatch:
 
@@ -180,7 +184,11 @@ jobs:
               sys.exit("no blueprint found under blueprints/<domain>/<slug>/")
           docs = pathlib.Path("README.md").read_text(encoding="utf-8")
           for path in found:
-              if path.name not in docs:
+              # Сравниваем полный путь, а не имя файла: переименование каталога
+              # слага оставляет имя прежним, и проверка по имени пропускала бы
+              # ровно тот случай, ради которого заведена, — ссылка на импорт
+              # ведёт на 404, а CI зелёный.
+              if path.as_posix() not in docs:
                   sys.exit(f"{path} is not the file the README tells people to import")
           print("layout OK;", ", ".join(str(p) for p in found))
           PY

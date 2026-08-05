@@ -192,6 +192,23 @@ def test_a_confirmed_manual_stop_still_clears_the_flag(replay):
     assert ctx["session_flag_stuck"] is True
 
 
+def test_the_cleanup_waits_one_pass_before_believing_the_switch(replay):
+    """The debounce that separates a manual stop from entity chatter.
+
+    Clearing the flag is the destructive move — it hands our own session away
+    as somebody else's — so it is worth one pass of patience. A real manual
+    stop survives that wait unchanged; a switch that merely flickered does not.
+    """
+    now, world = dropout_world(TICKS["T+1.9"])
+    world[SWITCH] = State("off", last_changed=now - dt.timedelta(seconds=5))
+    world[POWER] = State(0, last_changed=now)
+    world[AMPERE] = State(0, last_changed=now)
+    ctx = replay(now, world)
+    assert ctx["switch_off_confirmed"] is True, "it does report off"
+    assert ctx["switch_gap_elapsed"] is False, "but only just now"
+    assert ctx["session_flag_stuck"] is False, "so the flag stays put for now"
+
+
 # ------------------------------------------------- and if it is lost anyway
 
 

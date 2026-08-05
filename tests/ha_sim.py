@@ -174,8 +174,17 @@ def _build_helpers(world: dict[str, State], now: dt.datetime) -> dict[str, Any]:
         obj = world.get(entity_id)
         return obj.attributes.get(attribute) if obj is not None else None
 
-    def is_state(entity_id: str, value: str) -> bool:
-        return states(entity_id) == value
+    def is_state(entity_id: str, value: Any) -> bool:
+        # A missing entity is False against *everything*, including the strings
+        # ``states()`` substitutes for it. Comparing through ``states()`` made
+        # ``is_state('sensor.gone', 'unknown')`` true here and false in Home
+        # Assistant - the emulator being softer than the real thing, which is
+        # the failure mode this file exists to prevent. Home Assistant also
+        # accepts a list of candidate states.
+        obj = world.get(entity_id)
+        if obj is None:
+            return False
+        return obj.state == value or (isinstance(value, list) and obj.state in value)
 
     def has_value(entity_id: str) -> bool:
         return states(entity_id) not in ("unknown", "unavailable")

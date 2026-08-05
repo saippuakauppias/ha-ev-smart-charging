@@ -76,8 +76,12 @@ def load(folder: Path) -> list[dict[str, Any]]:
         # посторонний JSON, в том числе списки и строки.
         if not isinstance(raw, dict):
             continue
+        # Проверяем не только наличие ключа, но и его тип: посторонний файл
+        # со строкой (или списком) под `trace` роняет разбор шагов уже после
+        # того, как отчёт начал печататься, — с трейсбеком в лицо человеку,
+        # который всего лишь просил разобрать папку загрузок.
         trace = raw.get("trace")
-        if not isinstance(trace, dict) or "trace" not in trace:
+        if not isinstance(trace, dict) or not isinstance(trace.get("trace"), dict):
             continue
         entries = raw.get("logbookEntries")
         runs.append({

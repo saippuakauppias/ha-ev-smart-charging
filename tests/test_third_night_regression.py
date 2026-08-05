@@ -416,3 +416,61 @@ def test_an_emergency_top_up_ignores_the_gentle_finish(replay):
     assert ctx["emergency"] is True
     assert ctx["soc"] >= 95, "the gentle threshold is met as well"
     assert ctx["gentle_finish_active"] is False
+
+
+# ------------------------------------------- the ramp that walked to the ceiling
+
+
+@pytest.mark.parametrize(
+    ("clock", "setpoint", "frozen_min"),
+    [((6, 32), 16, 8.5), ((6, 33), 20, 9.5), ((6, 34), 23, 10.5), ((6, 35), 27, 12.0)],
+)
+def test_the_ramp_to_the_ceiling_is_held_by_the_staleness_guard(
+    replay, clock, setpoint, frozen_min
+):
+    """06:32-06:35, the four writes that walked 16 -> 20 -> 23 -> 27 -> 28 A.
+
+    Every pass was woken by the blueprint's own previous write, and the
+    percentage sat at 99 the whole time: the plan grew only because
+    ``hours_left`` was melting, so not one of the four rises carried
+    information.
+
+    ``soc_fresh_enough_to_rise`` was meant to stop exactly this, and it stopped
+    the first two steps - but ``and`` binds tighter than ``or`` in Jinja, so the
+    ceiling exception ``or (at_boundary and setpoint_differs)`` used to be a
+    clause of its own, outside the guard. Once the plan reached the ceiling the
+    remaining steps sailed through it. The parentheses in ``want_write`` are
+    what keep the exception inside the guard.
+    """
+    now = moment(*clock, day=4, month=8)
+    world = night_world(
+        now, switch="on", status="charging", soc=99, setpoint=setpoint,
+        delivered=11.669, power=2592, flag="on", setpoint_age=60,
+    )
+    world[SOC] = State(99, last_changed=now - dt.timedelta(minutes=frozen_min))
+    ctx = replay(now, world, max_current=28, gentle_finish_soc=100)
+
+    assert ctx["current_rising"] is True, "the plan is asking for more"
+    assert ctx["soc_fresh_enough_to_rise"] is False, "nothing new was learned"
+    assert ctx["needs_write"] is False, "a rise on a frozen percentage is noise"
+
+
+def test_the_ceiling_exception_still_works_on_the_way_down(replay):
+    """The exception must keep doing its own job.
+
+    A station that reports 27.9 where we asked for 28 would otherwise look
+    permanently wrong by less than the deadband, and the setpoint would never
+    be corrected. Coming down is not gated by freshness, so this must still
+    write.
+    """
+    now = moment(6, 32, day=4, month=8)
+    world = night_world(
+        now, switch="on", status="charging", soc=99, setpoint=28,
+        delivered=11.669, power=2592, flag="on", setpoint_age=60,
+    )
+    world[SOC] = State(99, last_changed=now - dt.timedelta(minutes=12))
+    ctx = replay(now, world, max_current=28, gentle_finish_soc=100)
+
+    assert ctx["current_rising"] is False, "we are at or above the plan"
+    assert ctx["soc_fresh_enough_to_rise"] is False, "stale on purpose"
+    assert ctx["needs_write"] is True, "lowering is never gated by freshness"

@@ -11,6 +11,7 @@ from conftest import (
     MODE,
     NUMBER,
     POWER,
+    SESSION,
     SOC,
     STATUS,
     SWITCH,
@@ -401,6 +402,46 @@ def test_an_empty_mode_value_is_never_written(evaluate):
 def test_the_mode_is_written_when_it_genuinely_differs(evaluate):
     ctx = evaluate(moment(23, 0), **{MODE: "scheduled_charge"})
     assert ctx["needs_mode_write"] is True
+
+
+def test_the_mode_of_a_manual_session_is_left_alone(evaluate):
+    """Not interfering with a hand-started session means the mode too.
+
+    Someone who started the charge themselves picked the settings they wanted;
+    switching the station out from under them is the same overreach as
+    rewriting their current.
+    """
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        inputs={"session_flag": SESSION},
+        **{
+            MODE: "scheduled_charge",
+            SESSION: "off",
+            "switch.charger": charging_since(now),
+        },
+    )
+    assert ctx["foreign_session"] is True
+    assert ctx["needs_mode_write"] is False
+
+
+def test_the_mode_command_waits_for_the_gap_like_any_other(evaluate):
+    """The mode is one more command into the same charger.
+
+    Mid-session it has to observe the pause; only the opening command of a
+    session skips it, because the station is still off and nothing precedes it.
+    """
+    now = moment(23, 0)
+    ctx = evaluate(
+        now,
+        inputs={"command_gap": 60},
+        **{
+            MODE: "scheduled_charge",
+            "switch.charger": State("on", last_changed=now - dt.timedelta(seconds=5)),
+        },
+    )
+    assert ctx["switch_gap_elapsed"] is False
+    assert ctx["needs_mode_write"] is False, "a running session waits its turn"
 
 
 def test_a_charger_that_quantises_the_setpoint_is_not_rewritten_forever(evaluate):

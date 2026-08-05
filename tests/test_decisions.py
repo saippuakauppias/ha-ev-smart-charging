@@ -110,6 +110,8 @@ def test_a_lower_target_stops_earlier(evaluate):
         now, inputs={"target_soc": 80}, **{SOC: 81, "switch.charger": charging_since(now)}
     )
     assert ctx["target_reached"] is True
+    assert ctx["must_stop"] is True, "and the name of this test is about stopping"
+    assert ctx["stop_reason"] == "target_reached"
 
 
 def test_end_of_window_stops_by_default(evaluate):
