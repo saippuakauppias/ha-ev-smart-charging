@@ -206,8 +206,13 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Install Home Assistant
-        run: pip install homeassistant
+      # The differential check imports the emulator, so it needs what the
+      # emulator needs (PyYAML, Jinja2) on top of Home Assistant itself.
+      # Installing the dev requirements too keeps this job honest: otherwise a
+      # missing package makes every template comparison fail identically, which
+      # reads as "the engines diverged completely" rather than "nothing ran".
+      - name: Install Home Assistant and the test dependencies
+        run: pip install homeassistant -r requirements-dev.txt
 
       # The script exits 77 when it decides to skip; to GitHub that is just a
       # failure, so translate it back into a pass.

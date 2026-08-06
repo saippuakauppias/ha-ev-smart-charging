@@ -139,8 +139,14 @@ TEMPLATES: list[str] = [
 
 
 def _ha_sim_render(template: str) -> Any:
+    # ``State`` comes from ``ha_sim`` and not from ``conftest``, even though the
+    # latter re-exports it: importing ``conftest`` pulls in pytest, which this
+    # script must not need. It runs in a job that installs Home Assistant and
+    # nothing else, and a missing pytest turned every single comparison into
+    # "<raises ModuleNotFoundError>" - 63 identical failures that looked like
+    # total engine divergence rather than one absent package.
     import ha_sim
-    from conftest import State
+    from ha_sim import State
 
     world = {
         entity: State(state, attrs, NOW - dt.timedelta(hours=1))
@@ -190,6 +196,19 @@ def main() -> int:
         print(f"Home Assistant is not importable: {err}")
         print("Install it with: pip install homeassistant")
         return 77
+
+    # Load the emulator once, before any comparison. A missing dependency here
+    # is an environment problem, not a divergence, and it has to be said so:
+    # the per-template ``except`` below would otherwise turn one absent package
+    # into 63 identical "<raises ModuleNotFoundError>" rows that read like the
+    # two engines disagreeing about everything.
+    try:
+        _ha_sim_render("{{ 1 }}")
+    except ModuleNotFoundError as err:
+        print(f"ha_sim could not be loaded: no module named {err.name!r}")
+        print("The emulator needs its own dependencies, not just Home Assistant:")
+        print("    pip install -r requirements-dev.txt")
+        return 2
 
     ha_results = asyncio.run(_ha_render_all(TEMPLATES))
 
