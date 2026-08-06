@@ -303,26 +303,41 @@ def test_a_foreign_session_still_running_at_the_end_is_flagged(tmp_path):
 
 
 def test_the_current_shortfall_is_averaged_and_reported(tmp_path):
-    """Both real nights ran about 1.3 A below the setpoint, every single pass."""
+    """Both real nights ran about 1.3 A below the setpoint, every single pass.
+
+    Reported as a share, because the setting it is compared against is a
+    multiplier: 1.3 A under 16 and under 19 is 8.1 and 6.8 per cent.
+    """
     write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00",
                                     current_now=16, actual_current=14.7))
     write(tmp_path, "b.json", a_run("2026-08-02T22:30:00+00:00",
                                     current_now=19, actual_current=17.7))
     out = run(tmp_path).stdout
-    assert "недодаёт в среднем 1.30 А" in out
+    assert "на 7 % меньше уставки" in out
 
 
 def test_a_station_that_delivers_what_was_asked_is_not_flagged(tmp_path):
     write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00",
                                     current_now=16, actual_current=15.9))
-    assert "недодаёт" not in run(tmp_path).stdout
+    assert "меньше уставки" not in run(tmp_path).stdout
 
 
 def test_an_idle_charger_does_not_count_as_underdelivering(tmp_path):
     """Zero current at a standing setpoint is a charger that is simply off."""
     write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00",
                                     current_now=16, actual_current=0))
-    assert "недодаёт" not in run(tmp_path).stdout
+    assert "меньше уставки" not in run(tmp_path).stdout
+
+
+def test_the_moment_of_stopping_is_not_counted_as_a_shortfall(tmp_path):
+    """Current decays over seconds, so the pass right after ``turn_off`` shows
+    a setpoint of 14 against 4.8 A actually flowing. One such sample on the
+    fifth night pulled the reported average from 1.25 A up to 1.52.
+    """
+    write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00",
+                                    current_now=14, actual_current=4.8,
+                                    switch_on=False))
+    assert "меньше уставки" not in run(tmp_path).stdout
 
 
 def test_a_quiet_night_says_so(tmp_path):

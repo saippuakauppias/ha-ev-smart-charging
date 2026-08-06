@@ -407,10 +407,12 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "the verdict and the stop reason rank causes differently",
-        "    {% elif car_left %}машина не дома\n"
+        "    {% elif car_left and (switch_on or (in_window and not target_reached"
+        " and plugged_in)) %}машина не дома\n"
         "    {% elif not plugged_in %}кабель не подключён",
         "    {% elif not plugged_in %}кабель не подключён\n"
-        "    {% elif car_left %}машина не дома",
+        "    {% elif car_left and (switch_on or (in_window and not target_reached"
+        " and plugged_in)) %}машина не дома",
     ),
     (
         "an unreadable status reports no cause when it does stop the session",
@@ -479,6 +481,22 @@ MUTATIONS: list[tuple[str, str, str]] = [
         "the arrival trigger fires on every coordinate update",
         "  - trigger: template\n    id: car_arrived\n    for:\n      seconds: 30\n",
         "  - trigger: template\n    id: car_arrived\n",
+    ),
+    # ---- behaviour repaired in 1.4.3 ----
+    (
+        # The fifth night: the tracker lied from 06:07 to the end, and once
+        # the charge stopped there was no current left to contradict it.
+        "a wandering tracker explains a session that already finished",
+        "    {% elif car_left and (switch_on or (in_window and not target_reached"
+        " and plugged_in)) %}машина не дома",
+        "    {% elif car_left %}машина не дома",
+    ),
+    (
+        # The other half: an absent car really is why no session starts.
+        "an absent car stops explaining why the charge never began",
+        "    {% elif car_left and (switch_on or (in_window and not target_reached"
+        " and plugged_in)) %}машина не дома",
+        "    {% elif car_left and switch_on %}машина не дома",
     ),
     (
         "the planned current carries no headroom over what it computed",
