@@ -8,8 +8,10 @@ falls outside its own selector range, a leftover debugging artefact.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import pytest
+from conftest import BLUEPRINT_PATH
 from ha_sim import InputRef
 
 SELECTOR_TYPES = {
@@ -119,7 +121,6 @@ def test_expected_triggers_are_present(blueprint):
         "charger_status",
         "current_written",
         "command_missed",
-        "setpoint_stale",
         "ha_start",
         "car_arrived",
         "target_hit",
@@ -139,7 +140,7 @@ def test_charger_state_triggers_ignore_entities_going_unavailable(blueprint):
     one moment the automation learns the station returned, so ``not_from``
     would throw away the signal along with the noise.
     """
-    watched = {"charger_status", "current_written", "setpoint_stale"}
+    watched = {"charger_status", "current_written"}
     seen = set()
     for trigger in blueprint.triggers:
         if trigger.get("id") not in watched:
@@ -323,3 +324,54 @@ def test_the_defaults_are_internally_consistent(blueprint):
     assert d["start_time"] != d["stop_time"]
     assert 0 <= d["current_headroom"] <= 30
     assert 50 <= d["gentle_finish_soc"] <= 100
+
+
+# ------------------------------------------------------- links into the docs
+
+
+DOCS_BASE = "https://saippuakauppias.github.io/ha-ev-smart-charging/"
+
+
+def _slugify(heading: str) -> str:
+    """Reproduce the anchor mkdocs generates for a heading."""
+    text = heading.strip().lower()
+    text = re.sub(r"[`*_\[\]()]", "", text)
+    text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE)
+    return re.sub(r"\s+", "-", text.strip())
+
+
+def _doc_anchors(page: Path) -> set[str]:
+    anchors = set()
+    for line in page.read_text(encoding="utf-8").splitlines():
+        match = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if match:
+            anchors.add(_slugify(match.group(2)))
+    return anchors
+
+
+def test_every_docs_link_in_the_blueprint_resolves():
+    """The blueprint is not built by mkdocs, so ``--strict`` never sees these.
+
+    A wrong anchor stays invisible until somebody clicks it in the Home
+    Assistant UI, and by then the page it pointed at may have been renamed
+    three releases ago. These links exist precisely to keep the long
+    explanations in one place, so they have to be checked somewhere.
+    """
+    source = BLUEPRINT_PATH.read_text(encoding="utf-8")
+    # Folded YAML scalars wrap long URLs across lines; rejoin before matching.
+    flat = re.sub(r"\n\s+", " ", source)
+    links = sorted(set(re.findall(rf"{re.escape(DOCS_BASE)}[^\s)\"']*", flat)))
+    assert links, "the blueprint should point people at the documentation"
+
+    docs_root = BLUEPRINT_PATH.parents[3] / "docs"
+    problems = []
+    for url in links:
+        path, _, anchor = url[len(DOCS_BASE):].partition("#")
+        path = path.strip("/")
+        page = docs_root / (f"{path}.md" if path else "index.md")
+        if not page.exists():
+            problems.append(f"{url} -> no such page: {page.name}")
+            continue
+        if anchor and anchor not in _doc_anchors(page):
+            problems.append(f"{url} -> no heading matching #{anchor}")
+    assert not problems, "broken documentation links:\n" + "\n".join(problems)

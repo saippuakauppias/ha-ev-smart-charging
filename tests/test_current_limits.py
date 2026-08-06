@@ -215,10 +215,13 @@ def test_the_emergency_top_up_does_not_quit_on_the_threshold(evaluate):
     """Stopping the moment the threshold is crossed would leave the car at the
     bare minimum and chatter on and off as the percentage wobbles."""
     now = moment(14, 0)
+    # Ten minutes in, not two hours: at the maximum current a top-up that had
+    # been running that long would be far past the threshold, and a fixture
+    # that cannot happen proves nothing about the behaviour under test.
     ctx = evaluate(
         now,
         inputs={"emergency_soc": 20},
-        **{SOC: 22, "switch.charger": charging_since(now)},
+        **{SOC: 21, "switch.charger": charging_since(now, minutes=10)},
     )
     assert ctx["emergency"] is True
     assert ctx["must_stop"] is False
@@ -240,6 +243,36 @@ def test_an_idle_charger_only_enters_the_emergency_below_the_threshold(evaluate)
     ctx = evaluate(moment(14, 0), inputs={"emergency_soc": 20}, **{SOC: 25})
     assert ctx["emergency"] is False
     assert ctx["should_charge"] is False
+
+
+@pytest.mark.parametrize("reading", ["unavailable", "unknown", "недоступно"])
+def test_an_emergency_never_fires_on_unusable_charge_data(evaluate, reading):
+    """The one guard between a dead integration and 32 A in the afternoon.
+
+    Invalid data drives ``soc`` to the -1 sentinel, and -1 is below *every*
+    threshold. Without the ``soc_valid`` check the emergency top-up would
+    therefore read "the battery is critically low" precisely when nothing at
+    all is known about the battery — and the emergency path is the one that
+    ignores the window, ignores the gentle finish and asks for the ceiling.
+
+    A cloud integration losing its token at midday is the ordinary way to get
+    here, not an exotic one.
+    """
+    ctx = evaluate(
+        moment(14, 0), inputs={"emergency_soc": 20}, **{SOC: State(reading)}
+    )
+    assert ctx["soc_valid"] is False
+    assert ctx["soc"] == -1, "the sentinel is below any threshold"
+    assert ctx["emergency"] is False, "unknown is not an emergency"
+    assert ctx["should_charge"] is False
+
+
+def test_an_emergency_still_fires_on_a_genuinely_low_battery(evaluate):
+    """The mirror of the test above: the guard must not disarm the feature."""
+    ctx = evaluate(moment(14, 0), inputs={"emergency_soc": 20}, **{SOC: 12})
+    assert ctx["soc_valid"] is True
+    assert ctx["emergency"] is True
+    assert ctx["should_charge"] is True
 
 
 def test_fallback_current_is_used_when_no_plan_is_possible(evaluate):

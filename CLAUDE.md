@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Блюпринт Home Assistant для умной ночной зарядки EV. Управляет силовым
+Блюпринт Home Assistant для нежной зарядки EV. Управляет силовым
 оборудованием: ошибка в логике ограничения тока — вопрос безопасности проводки,
 а не косметики.
 
@@ -15,6 +15,7 @@
 |---|---|
 | `blueprints/automation/ev_smart_charging/ev_smart_charging.yaml` | весь продукт, ~2300 строк |
 | `tests/ha_sim.py` | офлайн-эмулятор шаблонов HA, на нём работают тесты |
+| `tests/differential_against_home_assistant.py` | сверяет эмулятор с настоящим HA; единственное, что ловит его дрейф |
 | `tests/test_mutations.py` | ломает блюпринт по одному месту и проверяет, что набор это ловит |
 | `tools/trace_report.py` | разбор скачанных трассировок; **держит совместимость с Python 3.9** |
 | `docs/` | сайт MkDocs; CHANGELOG/CONTRIBUTING/SECURITY лежат в корне и подключены сниппетами |
@@ -27,6 +28,10 @@ pytest -m slow -n auto   # мутации, несколько минут, пер
 ruff check tests/ tools/
 yamllint -c .yamllint.yaml blueprints/ .github/ .yamllint.yaml mkdocs.yml
 mkdocs build --strict    # сайт; битая ссылка = падение сборки
+
+# требуют `pip install homeassistant`, обе информационные в CI
+python tests/validate_with_home_assistant.py        # схема: входы и селекторы
+python tests/differential_against_home_assistant.py # правили ha_sim.py — прогнать
 ```
 
 ## Правила правки блюпринта
@@ -44,7 +49,9 @@ mkdocs build --strict    # сайт; битая ссылка = падение с
    поведение значимое.
 5. **Новая функция шаблонов** — реализовать в `tests/ha_sim.py` строго как
    в настоящем HA, **включая отказы**. Движок мягче настоящего HA опаснее
-   отсутствующего: тесты зеленеют, в проде ломается.
+   отсутствующего: тесты зеленеют, в проде ломается. Затем добавить её вызовы
+   в `tests/differential_against_home_assistant.py` и прогнать его — иначе
+   у новой реализации не будет эталона, с которым её сверяют.
 
 ## Грабли, на которые уже наступали
 

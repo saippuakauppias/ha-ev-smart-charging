@@ -1,7 +1,7 @@
 ---
 site_name: EV Smart Charging
 site_description: >-
-  Блюпринт Home Assistant для умной ночной зарядки электромобиля:
+  Блюпринт Home Assistant для нежной зарядки электромобиля:
   динамический подбор тока, растяжка на окно, отказоустойчивость.
 site_url: https://saippuakauppias.github.io/ha-ev-smart-charging/
 repo_url: https://github.com/saippuakauppias/ha-ev-smart-charging

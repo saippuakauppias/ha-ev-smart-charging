@@ -99,14 +99,13 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "battery health is not checked against a sane range",
-        "    {% if 50 <= soh_scaled | float(-1) <= 130 %}",
-        "    {% if true %}",
+        "      {{ scaled if 50 <= scaled <= 130 else 100 }}",
+        "      {{ scaled }}",
     ),
     (
         "battery health reported as a fraction is not rescaled",
-        "    {{ (soh_raw | float(-1) * 100) if 0 < soh_raw | float(-1) < 2\n"
-        "       else soh_raw | float(-1) }}",
-        "    {{ soh_raw | float(-1) }}",
+        "      {% set scaled = (v * 100) if 0 < v < 2 else v %}",
+        "      {% set scaled = v %}",
     ),
     (
         "the time reserve is not subtracted from the budget",
@@ -115,8 +114,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "the deadband blocks reaching the boundary current",
-        "\n       or (at_boundary and setpoint_differs) }}",
-        " }}",
+        "\n        or (at_boundary and setpoint_differs))",
+        ")",
     ),
     # ---- behaviour added or repaired in 1.1.0 ----
     (
@@ -174,6 +173,46 @@ MUTATIONS: list[tuple[str, str, str]] = [
         "{{ soc < emergency_soc | float(0) + emergency_hysteresis | float(10) }}",
         "{{ soc < emergency_soc | float(0) }}",
     ),
+    (
+        # ``soc`` is -1 when the data is unusable, and -1 is below every
+        # threshold - so without this guard a dead integration reads as a
+        # critically low battery, and the emergency path is the one that
+        # ignores the window and asks for the ceiling.
+        "an emergency top-up fires on unusable charge data",
+        "{% if emergency_soc | float(0) <= 0 or not soc_valid %}",
+        "{% if emergency_soc | float(0) <= 0 %}",
+    ),
+    (
+        "the mode of a hand-started session is overridden too",
+        "{{ e_mode_select != '' and mode_value != '' and not foreign_session",
+        "{{ e_mode_select != '' and mode_value != ''",
+    ),
+    (
+        "the mode command ignores the pause between commands",
+        "       and not is_state(e_mode_select, mode_value)\n"
+        "       and (switch_gap_elapsed or not switch_on) }}",
+        "       and not is_state(e_mode_select, mode_value) }}",
+    ),
+    (
+        "the flag cleanup acts on the first flicker of the switch",
+        "       and switch_gap_elapsed }}",
+        "       }}",
+    ),
+    (
+        "standby draw counts as current flowing",
+        "      {{ states(e_power) | float(0) > no_power_threshold | float(200) }}",
+        "      {{ states(e_power) | float(0) > 0 }}",
+    ),
+    (
+        "a small battery makes its own session meter implausible",
+        '  energy_sane_max: "{{ [effective_capacity | float(50) * 2, 20] | max }}"',
+        '  energy_sane_max: "{{ effective_capacity | float(50) * 2 }}"',
+    ),
+    (
+        "the log shows the uncapped calculation and reads like a breakage",
+        '  calc_current_shown: "{{ [calc_current | float(0), num_max] | min | round(2) }}"',
+        '  calc_current_shown: "{{ calc_current | float(0) | round(2) }}"',
+    ),
     # ---- second review round ----
     (
         "swapped current bounds raise the ceiling instead of lowering the floor",
@@ -184,8 +223,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a session meter is rejected whenever it overshoots a small target",
-        "and states(e_energy) | float(0) <= energy_sane_max | float(100) }}",
-        "and states(e_energy) | float(0) <= energy_target | float(0) * 3 }}",
+        "and states(e_energy) | float(0) <= energy_sane_max | float(100)",
+        "and states(e_energy) | float(0) <= energy_target | float(0) * 3",
     ),
     (
         "finishing off after the window hammers the daytime tariff",
@@ -293,10 +332,10 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "the deadband swallows a request to raise the current",
-        "         > (rise_tolerance | float(0.5)\n"
-        "            if (current_rising or not switch_on)\n"
-        "            else [deadband | float(2), rise_tolerance | float(0.5)] | max)",
-        "         > deadband | float(2)",
+        "          > (rise_tolerance | float(0.5)\n"
+        "             if (current_rising or not switch_on)\n"
+        "             else [deadband | float(2), rise_tolerance | float(0.5)] | max)",
+        "          > deadband | float(2)",
     ),
     (
         "a charger that quantises the setpoint is rewritten forever",
@@ -395,9 +434,51 @@ MUTATIONS: list[tuple[str, str, str]] = [
         "    entity_id: !input charger_current_number\n"
         '    not_to: ["unknown", "unavailable"]\n'
         "    for:\n"
-        '      seconds: "{{ (command_gap | int(60)) * 2 }}"\n'
-        "    id: setpoint_stale\n",
+        "      seconds: !input command_gap\n"
+        "    id: current_written\n",
         "",
+    ),
+    # ---- behaviour added or repaired in 1.4.1 ----
+    (
+        "a rise is written even when the charge percentage is stale",
+        "\n       and (not current_rising or not switch_on or soc_fresh_enough_to_rise)",
+        "",
+    ),
+    (
+        "the staleness guard also blocks lowering the current",
+        "       and (not current_rising or not switch_on or soc_fresh_enough_to_rise)",
+        "       and soc_fresh_enough_to_rise",
+    ),
+    (
+        # The parentheses that keep the ceiling exception inside the guard.
+        # Without them `and` binds tighter than `or`, the exception becomes a
+        # clause of its own, and a ramp on a frozen percentage walks straight
+        # to the ceiling - exactly what the third night recorded.
+        "the ceiling exception escapes the staleness guard",
+        "    {{ ((desired_current - current_now) | abs\n"
+        "          > (rise_tolerance | float(0.5)\n"
+        "             if (current_rising or not switch_on)\n"
+        "             else [deadband | float(2), rise_tolerance | float(0.5)] | max)\n"
+        "        or (at_boundary and setpoint_differs))\n"
+        "       and (not current_rising or not switch_on or soc_fresh_enough_to_rise) }}",
+        "    {{ (desired_current - current_now) | abs\n"
+        "          > (rise_tolerance | float(0.5)\n"
+        "             if (current_rising or not switch_on)\n"
+        "             else [deadband | float(2), rise_tolerance | float(0.5)] | max)\n"
+        "       and (not current_rising or not switch_on or soc_fresh_enough_to_rise)\n"
+        "        or (at_boundary and setpoint_differs) }}",
+    ),
+    (
+        "a cumulative meter passes once its counter has been reset",
+        "    {{ switch_off_confirmed and charger_online and not charging_now\n"
+        "       and states(e_energy) | float(0) > "
+        "[effective_capacity | float(50) * 0.1, 2] | max }}",
+        "    {{ false }}",
+    ),
+    (
+        "the arrival trigger fires on every coordinate update",
+        "  - trigger: template\n    id: car_arrived\n    for:\n      seconds: 30\n",
+        "  - trigger: template\n    id: car_arrived\n",
     ),
     (
         "the planned current carries no headroom over what it computed",
@@ -417,8 +498,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a dropout counts as proof the car is no longer plugged in",
-        "  physically_present: >-\n    {% if switch_off_confirmed %}",
-        "  physically_present: >-\n    {% if not switch_on %}",
+        '  physically_present: "{{ charging_now and not switch_off_confirmed }}"',
+        '  physically_present: "{{ charging_now and not switch_on }}"',
     ),
     (
         "the shortfall is measured while the setpoint is still settling",

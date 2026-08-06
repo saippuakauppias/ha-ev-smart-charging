@@ -331,9 +331,33 @@ def test_the_snapshot_agrees_with_the_variables_it_reports(evaluate):
     assert diag["решение"]["остановить"] == ctx["must_stop"]
     assert diag["ток"]["уставка_нужна"] == ctx["desired_current"]
     assert diag["ток"]["уставка_сейчас"] == ctx["current_now"]
-    assert diag["команды"]["записать_ток"] == ctx["needs_write"]
+    # The command flags report what will actually reach the charger, so they
+    # carry ``should_charge`` as a factor. Spelled out in full here: with
+    # ``should_charge`` true in this fixture, comparing against ``needs_write``
+    # alone would be the same expression on both sides.
+    assert diag["команды"]["записать_ток"] == (
+        ctx["needs_write"] and ctx["should_charge"]
+    )
     assert diag["план"]["часов_осталось"] == ctx["hours_left"]
     assert diag["станция"]["статус"] == ctx["charger_status"]
+
+
+def test_the_shown_calculation_is_capped_but_the_raw_one_is_not(evaluate):
+    """Two numbers on purpose, and the difference is the whole point.
+
+    In the last minutes of the window the planning horizon collapses to
+    seconds and the formula returns hundreds of amps. That never reaches the
+    charger — the ceiling clamps it — but "расчёт 495 А" in the log reads like
+    a breakage and derails the review of the night. So the snapshot shows the
+    capped figure, while the raw one stays raw: it is what tells you the
+    station could not keep up.
+    """
+    now = moment(6, 54)  # the window closes at 07:00
+    ctx = evaluate(now, **{SOC: 20, "switch.charger": charging_since(now)})
+    assert ctx["calc_current"] > ctx["num_max"], "the horizon has collapsed"
+    assert ctx["calc_current_shown"] == ctx["num_max"], "shown value is capped"
+    assert ctx["diag"]["ток"]["расчёт_до_округления"] == ctx["calc_current_shown"]
+    assert ctx["diag"]["ток"]["расчёт_сырой"] == ctx["calc_current"]
 
 
 def test_the_snapshot_reports_missing_sensors_as_missing(evaluate):

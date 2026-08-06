@@ -4,6 +4,10 @@ name: CI
 on:
   push:
     branches: [main]
+    # Теги нужны здесь ради джобы packaging: без них сверка тега с версией
+    # блюпринта не выполнялась никогда — push тега не подходит под фильтр
+    # branches, и github.ref_type всегда был `branch`.
+    tags: ["[0-9]+.[0-9]+.[0-9]+"]
   pull_request:
   workflow_dispatch:
 
@@ -19,7 +23,7 @@ jobs:
     name: YAML lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
@@ -41,7 +45,7 @@ jobs:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
@@ -59,7 +63,7 @@ jobs:
     name: Mutation testing
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
@@ -83,7 +87,7 @@ jobs:
     name: Python lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
@@ -109,7 +113,7 @@ jobs:
     # The script is what users run to produce a bug report, so it must work on
     # a stock system interpreter with nothing installed. macOS still ships 3.9.
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
@@ -142,7 +146,7 @@ jobs:
     name: Release metadata
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       # The version lives in the blueprint description and nowhere else, so it
       # can silently disagree with the changelog. A tag disagreeing with either
@@ -180,26 +184,35 @@ jobs:
               sys.exit("no blueprint found under blueprints/<domain>/<slug>/")
           docs = pathlib.Path("README.md").read_text(encoding="utf-8")
           for path in found:
-              if path.name not in docs:
+              # Сравниваем полный путь, а не имя файла: переименование каталога
+              # слага оставляет имя прежним, и проверка по имени пропускала бы
+              # ровно тот случай, ради которого заведена, — ссылка на импорт
+              # ведёт на 404, а CI зелёный.
+              if path.as_posix() not in docs:
                   sys.exit(f"{path} is not the file the README tells people to import")
           print("layout OK;", ", ".join(str(p) for p in found))
           PY
 
   home-assistant-schema:
-    name: Home Assistant schema (informational)
+    name: Home Assistant checks (informational)
     runs-on: ubuntu-latest
     # Home Assistant's internal APIs carry no stability promise, so a failure
     # here is a signal to investigate rather than a reason to block a merge.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
-      - name: Install Home Assistant
-        run: pip install homeassistant
+      # The differential check imports the emulator, so it needs what the
+      # emulator needs (PyYAML, Jinja2) on top of Home Assistant itself.
+      # Installing the dev requirements too keeps this job honest: otherwise a
+      # missing package makes every template comparison fail identically, which
+      # reads as "the engines diverged completely" rather than "nothing ran".
+      - name: Install Home Assistant and the test dependencies
+        run: pip install homeassistant -r requirements-dev.txt
 
       # The script exits 77 when it decides to skip; to GitHub that is just a
       # failure, so translate it back into a pass.
@@ -209,6 +222,21 @@ jobs:
           python tests/validate_with_home_assistant.py || status=$?
           if [ "$status" -eq 77 ]; then
             echo "::notice::schema check skipped"
+            exit 0
+          fi
+          exit "$status"
+
+      # The whole test suite runs on a reimplementation of the template engine,
+      # so the suite cannot notice when that reimplementation drifts. This is
+      # the only check that compares it against the real thing. The dangerous
+      # direction is one-sided: an emulator softer than Home Assistant keeps the
+      # suite green while the blueprint breaks at night.
+      - name: ha_sim renders the same as Home Assistant
+        run: |
+          status=0
+          python tests/differential_against_home_assistant.py || status=$?
+          if [ "$status" -eq 77 ]; then
+            echo "::notice::differential check skipped"
             exit 0
           fi
           exit "$status"
