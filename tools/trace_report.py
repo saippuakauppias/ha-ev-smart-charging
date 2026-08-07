@@ -202,11 +202,29 @@ def anomalies(runs: list[dict[str, Any]], tz: dt.timezone) -> list[str]:
     offline_since: dt.datetime | None = None
     foreign_since: dt.datetime | None = None
     shortfalls: list[float] = []
+    previous: tuple[dt.datetime, list[str]] | None = None
 
     for run in runs:
         moment, values = when(run, tz), variables(run)
         if moment is None:
             continue
+
+        # Два прогона, стартовавшие почти одновременно, — это гонка триггеров:
+        # круглое время начала окна попадает на сетку пересчёта. Если оба
+        # успели послать одну и ту же команду, станция получила дубль вплотную,
+        # чего пауза между командами как раз и не должна допускать.
+        # В шестую ночь так ушли два `number.set_value` с разницей 204 мс.
+        sent = commands(run)
+        if previous is not None:
+            gap = (moment - previous[0]).total_seconds()
+            repeated = sorted(set(sent) & set(previous[1]))
+            if 0 <= gap < 1 and repeated:
+                found.append(
+                    f"{moment:%m-%d %H:%M:%S} два прогона за {gap * 1000:.0f} мс "
+                    f"послали одно и то же ({', '.join(repeated)}) — "
+                    f"гонка триггеров, обновите блюпринт до 1.4.4"
+                )
+        previous = (moment, sent)
 
         # Чужая сессия, длящаяся часами, почти наверняка своя: человек,
         # включивший зарядку руками, не делает этого каждую ночь подряд.

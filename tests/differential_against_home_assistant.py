@@ -135,7 +135,42 @@ TEMPLATES: list[str] = [
     "{{ today_at('06:55:00') > today_at('23:05:00') }}",
     "{{ (today_at('06:55:00') - today_at('03:00:00')).total_seconds() }}",
     "{{ (timedelta(days=1)).total_seconds() }}",
+    # --- `this`, and the three ways reading last_triggered goes wrong -------
+    # The automation component passes ``this`` as ``state.as_dict()``, a plain
+    # mapping. Each of these is a state the blueprint really meets: a fresh
+    # install (attribute present but None), an entity that has none, and the
+    # window before the entity exists at all. Both engines must agree on the
+    # raises, not just on the happy path.
+    "{{ this.attributes.get('last_triggered') is none }}",
+    "{{ (now() - this.attributes.get('last_triggered')).total_seconds() > 0 }}",
+    "{{ this_never.attributes.get('last_triggered', 'fallback') }}",
+    "{{ (now() - this_never.attributes.get('last_triggered')).total_seconds() }}",
+    "{{ this_bare.attributes.get('last_triggered', 'fallback') }}",
+    "{{ this_none.attributes.get('last_triggered') }}",
+    "{% set lt = this_none.attributes.get('last_triggered') "
+    "if this_none is not none else none %}"
+    "{{ 999999 if lt is none else (now() - lt).total_seconds() | round(3) }}",
+    "{% set lt = this_never.attributes.get('last_triggered') "
+    "if this_never is not none else none %}"
+    "{{ 999999 if lt is none else (now() - lt).total_seconds() | round(3) }}",
 ]
+
+#: ``this`` in its four shapes, shared by both engines so the comparison is
+#: about the template rules and not about the fixture.
+THIS_VARIANTS: dict[str, Any] = {
+    "this": {
+        "entity_id": "automation.probe",
+        "state": "on",
+        "attributes": {"last_triggered": NOW - dt.timedelta(seconds=0.204)},
+    },
+    "this_never": {
+        "entity_id": "automation.probe",
+        "state": "on",
+        "attributes": {"last_triggered": None},
+    },
+    "this_bare": {"entity_id": "automation.probe", "state": "on", "attributes": {}},
+    "this_none": None,
+}
 
 
 def _ha_sim_render(template: str) -> Any:
@@ -153,6 +188,7 @@ def _ha_sim_render(template: str) -> Any:
         for entity, (state, attrs) in WORLD.items()
     }
     helpers = ha_sim._build_helpers(world, NOW)
+    helpers.update(THIS_VARIANTS)
     return ha_sim._render(template, helpers, {})
 
 
@@ -167,7 +203,9 @@ async def _ha_render_all(templates: list[str]) -> dict[str, Any]:
         results: dict[str, Any] = {}
         for tpl in templates:
             try:
-                results[tpl] = ha_tpl.Template(tpl, hass).async_render()
+                results[tpl] = ha_tpl.Template(tpl, hass).async_render(
+                    variables=THIS_VARIANTS
+                )
             except Exception as err:  # noqa: BLE001 - any failure is a result
                 results[tpl] = f"<raises {type(err).__name__}>"
         return results

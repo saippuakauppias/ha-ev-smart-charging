@@ -340,6 +340,60 @@ def test_the_moment_of_stopping_is_not_counted_as_a_shortfall(tmp_path):
     assert "меньше уставки" not in run(tmp_path).stdout
 
 
+def a_command_run(when_utc: str, domain: str, service: str):
+    """A trace that both carries variables and calls one service."""
+    return a_trace(
+        start=when_utc,
+        steps={
+            "action/0": [{"changed_variables": {"soc": 80}}],
+            "action/1": [{"result": {"params": {"domain": domain, "service": service}}}],
+        },
+    )
+
+
+def test_two_runs_racing_into_the_same_command_are_flagged(tmp_path):
+    """The sixth night: a round start time lands on the recalculation grid, so
+    ``window_start`` and ``tick`` fired 204 ms apart and both reached
+    ``number.set_value``. The station got two identical writes a fifth of a
+    second apart — exactly what the command gap exists to prevent, and exactly
+    what the entity-age throttle cannot see.
+    """
+    write(tmp_path, "a.json",
+          a_command_run("2026-08-06T20:30:00.091+00:00", "number", "set_value"))
+    write(tmp_path, "b.json",
+          a_command_run("2026-08-06T20:30:00.295+00:00", "number", "set_value"))
+    out = run(tmp_path).stdout
+    assert "гонка триггеров" in out
+    assert "204 мс" in out
+
+
+def test_two_close_runs_sending_different_commands_are_not_a_race(tmp_path):
+    """Writing the setpoint and then turning on is the intended queue, not a
+    collision: the blueprint deliberately splits them across runs."""
+    write(tmp_path, "a.json",
+          a_command_run("2026-08-06T20:30:00.091+00:00", "number", "set_value"))
+    write(tmp_path, "b.json",
+          a_command_run("2026-08-06T20:30:00.295+00:00", "switch", "turn_on"))
+    assert "гонка триггеров" not in run(tmp_path).stdout
+
+
+def test_the_same_command_a_minute_apart_is_an_ordinary_retry(tmp_path):
+    """A repeat after the command gap is the watchdog doing its job."""
+    write(tmp_path, "a.json",
+          a_command_run("2026-08-06T20:30:00+00:00", "switch", "turn_off"))
+    write(tmp_path, "b.json",
+          a_command_run("2026-08-06T20:30:28+00:00", "switch", "turn_off"))
+    assert "гонка триггеров" not in run(tmp_path).stdout
+
+
+def test_two_close_runs_that_sent_nothing_are_not_a_race(tmp_path):
+    """Дребезг сущностей при обрыве связи даёт пачку прогонов за секунду, и
+    сам по себе он безобиден: команд никто не слал."""
+    write(tmp_path, "a.json", a_run("2026-08-06T20:30:00.091+00:00", soc=80))
+    write(tmp_path, "b.json", a_run("2026-08-06T20:30:00.295+00:00", soc=80))
+    assert "гонка триггеров" not in run(tmp_path).stdout
+
+
 def test_a_quiet_night_says_so(tmp_path):
     write(tmp_path, "a.json", a_run("2026-08-02T21:30:00+00:00", foreign_session=False))
     assert "(ничего необычного)" in run(tmp_path).stdout

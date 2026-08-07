@@ -74,6 +74,38 @@ class State:
         self.state = str(self.state)
 
 
+#: Sentinel: the caller said nothing about ``this``, so leave the name
+#: undefined exactly as it is in a plain template render.
+_NO_THIS = object()
+
+
+def automation_this(
+    last_triggered: dt.datetime | object | None = _NO_THIS,
+) -> dict[str, Any]:
+    """The ``this`` variable as the automation component builds it.
+
+    Home Assistant assigns ``this = state.as_dict()`` — a plain mapping, not a
+    ``State`` object — and it snapshots the entity *before* the run starts, so
+    ``last_triggered`` always describes the previous run.
+
+    The failure modes matter more than the happy path, and each is real:
+
+    * ``this`` is ``None`` until the automation entity exists, and touching an
+      attribute of it raises;
+    * on the very first run ``last_triggered`` is ``None`` while the key is
+      *present*, so ``get(key, default)`` returns ``None`` rather than the
+      default and the arithmetic below it raises ``TypeError``;
+    * an entity may carry no such attribute at all.
+
+    Verified against Home Assistant 2026.2.3. Pass ``last_triggered=None`` for
+    the never-ran case and omit it entirely for the missing-attribute case.
+    """
+    attributes: dict[str, Any] = {}
+    if last_triggered is not _NO_THIS:
+        attributes["last_triggered"] = last_triggered
+    return {"entity_id": "automation.test", "state": "on", "attributes": attributes}
+
+
 class _StatesAccessor:
     """Implements both ``states('x.y')`` and ``states['x.y']`` like HA does."""
 
@@ -166,7 +198,9 @@ def _compile(source: str):
     return template
 
 
-def _build_helpers(world: dict[str, State], now: dt.datetime) -> dict[str, Any]:
+def _build_helpers(
+    world: dict[str, State], now: dt.datetime, this: Any = _NO_THIS
+) -> dict[str, Any]:
     """The subset of the Home Assistant template API the blueprint relies on."""
     states = _StatesAccessor(world)
 
@@ -206,7 +240,7 @@ def _build_helpers(world: dict[str, State], now: dt.datetime) -> dict[str, Any]:
             hour=parts[0], minute=parts[1], second=parts[2], microsecond=0
         )
 
-    return {
+    helpers = {
         "states": states,
         "state_attr": state_attr,
         "is_state": is_state,
@@ -217,6 +251,9 @@ def _build_helpers(world: dict[str, State], now: dt.datetime) -> dict[str, Any]:
         "today_at": today_at,
         "timedelta": dt.timedelta,
     }
+    if this is not _NO_THIS:
+        helpers["this"] = this
+    return helpers
 
 
 #: Home Assistant only accepts a rendered result as a number when it looks like
@@ -249,7 +286,19 @@ def _render(
         return template
     if "{{" not in template and "{%" not in template:
         return template
-    return _coerce(_compile(template).render(**helpers, **context))
+    try:
+        rendered = _compile(template).render(**helpers, **context)
+    except TemplateError:
+        raise
+    except Exception as err:  # noqa: BLE001 - mirrors Home Assistant exactly
+        # ``Template.async_render`` wraps *every* rendering failure:
+        # ``except Exception as err: raise TemplateError(err) from err``.
+        # Letting Jinja's own UndefinedError or TypeError through made the
+        # emulator report a different exception type than production for the
+        # same broken template — the differential caught exactly that on
+        # ``this.attributes`` and on arithmetic over a ``None`` last_triggered.
+        raise TemplateError(err) from err
+    return _coerce(rendered)
 
 
 class MissingInput(KeyError):
@@ -352,10 +401,15 @@ class Blueprint:
         world: dict[str, State],
         now: dt.datetime,
         inputs: dict[str, Any] | None = None,
+        this: Any = _NO_THIS,
     ) -> dict[str, Any]:
         """Render every blueprint variable in order and return the context."""
         resolved = self.resolve_inputs(inputs)
-        helpers = _build_helpers(world, now)
+        if this is _NO_THIS:
+            # An automation that last ran long ago: the ordinary case, and the
+            # one that leaves the throttling to the entity ages as before.
+            this = automation_this(now - dt.timedelta(days=1))
+        helpers = _build_helpers(world, now, this)
         context: dict[str, Any] = {}
         for name, node in self.variables.items():
             if isinstance(node, InputRef):
@@ -373,6 +427,7 @@ class Blueprint:
         world: dict[str, State],
         now: dt.datetime,
         inputs: dict[str, Any] | None = None,
+        this: Any = _NO_THIS,
     ) -> list[dict[str, Any]]:
         """Walk the ``actions:`` block and return the calls it would make.
 
@@ -383,8 +438,10 @@ class Blueprint:
         ``{"hook": <name>}`` so tests can assert that a notification fired
         without caring what the user put in it.
         """
-        helpers = _build_helpers(world, now)
-        context = self.evaluate(world=world, now=now, inputs=inputs)
+        if this is _NO_THIS:
+            this = automation_this(now - dt.timedelta(days=1))
+        helpers = _build_helpers(world, now, this)
+        context = self.evaluate(world=world, now=now, inputs=inputs, this=this)
         calls: list[dict[str, Any]] = []
 
         def truthy(value: Any) -> bool:

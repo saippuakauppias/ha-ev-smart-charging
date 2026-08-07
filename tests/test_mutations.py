@@ -69,7 +69,8 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "command throttling is bypassed",
-        '  gap_elapsed: "{{ current_age | float(0) >= command_gap | float(60) }}"',
+        "  gap_elapsed: >-\n"
+        "    {{ current_age | float(0) >= command_gap | float(60) and not run_is_a_race }}",
         '  gap_elapsed: "{{ true }}"',
     ),
     (
@@ -190,6 +191,7 @@ MUTATIONS: list[tuple[str, str, str]] = [
     (
         "the mode command ignores the pause between commands",
         "       and not is_state(e_mode_select, mode_value)\n"
+        "       and not run_is_a_race\n"
         "       and (switch_gap_elapsed or not switch_on) }}",
         "       and not is_state(e_mode_select, mode_value) }}",
     ),
@@ -246,14 +248,18 @@ MUTATIONS: list[tuple[str, str, str]] = [
     (
         "a hand-started session has its current overridden",
         "    {{ want_write and not foreign_session and status_known\n"
+        "       and not run_is_a_race\n"
         "       and (gap_elapsed or not switch_on) }}",
-        "    {{ want_write and status_known and (gap_elapsed or not switch_on) }}",
+        "    {{ want_write and status_known and not run_is_a_race\n"
+        "       and (gap_elapsed or not switch_on) }}",
     ),
     (
         "the current is steered while the charger status is unreadable",
         "    {{ want_write and not foreign_session and status_known\n"
+        "       and not run_is_a_race\n"
         "       and (gap_elapsed or not switch_on) }}",
         "    {{ want_write and not foreign_session\n"
+        "       and not run_is_a_race\n"
         "       and (gap_elapsed or not switch_on) }}",
     ),
     (
@@ -263,7 +269,7 @@ MUTATIONS: list[tuple[str, str, str]] = [
     ),
     (
         "a hand-started session is switched off at the end of the window",
-        "and (stop_regardless_of_owner or not foreign_session)",
+        "and (stop_regardless_of_owner or finishing_own_stop or not foreign_session)",
         "and true",
     ),
     (
@@ -502,6 +508,57 @@ MUTATIONS: list[tuple[str, str, str]] = [
         "the planned current carries no headroom over what it computed",
         "      {{ (raw * (1 + [headroom_pct | float(0), 0] | max / 100)) | round(3) }}",
         "      {{ raw | round(3) }}",
+    ),
+    # ---- behaviour repaired in 1.4.4 ----
+    (
+        # The sixth night: window_start and tick fired 204 ms apart and both
+        # reached number.set_value, because the setpoint entity had not moved
+        # yet and every entity-based check said the gap was served.
+        "two triggers firing together each send the same command",
+        "  run_is_a_race: >-\n"
+        "    {{ command_gap | float(60) > 0 and run_age | float(999999) < 1 }}",
+        '  run_is_a_race: "{{ false }}"',
+    ),
+    (
+        # The guard must not fire on a fresh install, where last_triggered is
+        # present but None and the naive subtraction raises.
+        "a never-triggered automation reads as having just run",
+        "    {{ 999999 if lt is none else (now() - lt).total_seconds() | round(3) }}",
+        "    {{ 0 if lt is none else (now() - lt).total_seconds() | round(3) }}",
+    ),
+    (
+        # The start-of-session exception bypasses the throttle entirely, and
+        # the race happened in exactly that branch.
+        "the race guard is bypassed while the charger is still off",
+        "       and not run_is_a_race\n"
+        "       and (gap_elapsed or not switch_on) }}",
+        "       and (gap_elapsed or not switch_on or run_is_a_race) }}",
+    ),
+    (
+        # The sixth night again: branch 2 lowers the flag before the station
+        # confirms off, and the blueprint saw its own stop as a stranger's.
+        "our own half-finished stop is left to a stranger's rules",
+        "  finishing_own_stop: >-\n"
+        "    {{ switch_on and not switch_gap_elapsed and session_flag_readable\n"
+        "       and not session_owned }}",
+        '  finishing_own_stop: "{{ false }}"',
+    ),
+    (
+        # And the protection it must not swallow: a real manual session has an
+        # old switch, so the age is what tells the two apart.
+        "a freshly flipped manual switch counts as our own stop",
+        "    {{ switch_on and not switch_gap_elapsed and session_flag_readable\n"
+        "       and not session_owned }}",
+        "    {{ switch_on and session_flag_readable and not session_owned }}",
+    ),
+    (
+        # A dropout takes the switch to unavailable, not to off, and the gentle
+        # finish used to lift its cap along with it — at 99% charge.
+        "a dropout lifts the gentle finish along with the switch",
+        "    {% if gentle_finish_active and not switch_off_confirmed\n"
+        "          and current_now | float(0) >= num_min %}",
+        "    {% if gentle_finish_active and switch_on\n"
+        "          and current_now | float(0) >= num_min %}",
     ),
     (
         "the gentle finish also blocks lowering the current",
